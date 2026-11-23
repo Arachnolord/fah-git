@@ -4,6 +4,22 @@ Schlanker Git-Server mit Ordnerbaum (beliebig tiefe Ordner wie GitLab-Gruppen), 
 (nie überschreibend) und Übernahme aus GitLab oder Gitea. Ein Node-Prozess ohne Datenbank: Repos liegen als normale Git-Ordner
 unter `daten/repos/`.
 
+## So sieht es aus
+
+Projekte durchstöbern – Ordnerbaum, Dateiliste und gerendertes README:
+
+![Dateiansicht mit Ordnerbaum und README](bilder/dateien.png)
+
+Quelltext mit Syntaxfarben und Zeilennummern, dazu Kopieren · Verlauf · Herunterladen · Bearbeiten · Löschen:
+
+![Quelltextansicht mit Werkzeugleiste](bilder/quelltext.png)
+
+Textdateien direkt im Browser bearbeiten – „Bearbeiten“, tippen, speichern (ein Commit auf dem Zweig):
+
+![Editor im Browser](bilder/editor.png)
+
+## Funktionen
+
 - Installieren: FAH-NAS → Apps → ZIP-App → `fah-git_release.zip`. Danach im Browser das erste Konto anlegen.
 - Aktualisieren: neue ZIP in FAH-NAS einspielen. `daten/` und `.env` bleiben.
 - git: `git clone http://<nas>:3300/<ordner>/<projekt>.git` – als Kennwort einen Zugangsschlüssel aus „Mein Konto“.
@@ -37,3 +53,6 @@ unter `daten/repos/`.
   Seit 1.7.0 zeigt die Seite je Schritt (Packen, Kopie aufs NAS) einen Balken mit Restzeit, auch nach neuem Seitenaufruf;
   die Kachel in der Übersicht nennt die Prozent. Halbfertige Archive heißen `.…teil` und zählen nie als Sicherung.
   Totalschaden 1:1 zurückholen. Für off-box-Schutz den Datenordner zusätzlich in FAH-Sicherung aufnehmen.
+- Im Browser bearbeiten (1.11.0): In der Dateiansicht einer Textdatei „Bearbeiten“ → Editor-Textfeld (Tab fügt einen
+  Tabulator ein, Cmd/Strg+S speichert). Speichern legt einen Commit auf den Zweig; eine zwischenzeitliche Änderung wird
+  erkannt und nicht überschrieben. Nur mit Schreibrecht, nicht in nur-lesbaren Kopien.
