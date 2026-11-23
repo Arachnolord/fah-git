@@ -1,0 +1,20 @@
+# FAH-Git als ZIP-App auf FAH-NAS. Werte aus .env (legt manage.sh beim ersten Lauf an).
+services:
+  fah-git:
+    build: .
+    image: fah-git:${FAHGIT_VERSION:-lokal}
+    restart: unless-stopped
+    ports:
+      - "${PORT:-3300}:3300"
+    environment:
+      TZ: Europe/Berlin
+      # Optional: feste Adresse für Klon-Links (sonst die, unter der FAH-Git aufgerufen wird).
+      FAHGIT_ADRESSE: ${ADRESSE:-}
+    volumes:
+      - ./daten:/daten
+    # Sparsam: Git-Server für eine Handvoll Nutzer. Adblock und Proxy auf demselben Rechner gehen vor.
+    cpus: 1.0
+    cpu_shares: 512
+    mem_limit: 512m
+    labels:
+      fahnas.webui: "http://{HOST}:${PORT:-3300}/"

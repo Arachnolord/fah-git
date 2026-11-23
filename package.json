@@ -1,0 +1,13 @@
+{
+  "name": "fah-git",
+  "version": "1.11.1",
+  "description": "FAH-Git – schlanker Git-Server mit Ordnerbaum, Spiegeln und Import aus GitLab/Gitea",
+  "type": "module",
+  "private": true,
+  "license": "UNLICENSED",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test tests/"
+  }
+}

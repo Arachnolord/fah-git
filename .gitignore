@@ -1,0 +1,6 @@
+node_modules/
+daten/
+.env
+*.zip
+!tools/*.zip
+.DS_Store
