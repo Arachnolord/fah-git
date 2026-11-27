@@ -34,7 +34,10 @@ export const GESPERRT_NAME = new RegExp([
 const INHALT_ORDNER = /^(schl(ue|ü)ssel|secrets?|credentials|zugangsdaten|\.ssh|\.aws|\.gnupg|\.git|\.docker)$/i;
 const INHALT_DATEI = [
   /^id_(rsa|dsa|ecdsa|ed25519)(\.pub)?$/i,
-  /^\.env(\.(?!(example|sample|dist|template|beispiel|vorlage|muster)$).+)?$/i,
+  // .env-Vorlagen dürfen mit (auch benannte wie .env.edeka.example, 1.15.3) – nur wenn der Name auf die Vorlagen-Endung
+  // ENDET; .env, .env.production, .env.example.local bleiben gesperrt.
+  /^\.env(?!(\.[^./]+)*\.(example|sample|dist|template|beispiel|vorlage|muster)$)(\..+)?$/i,
+  /^\.env(rc|[~_-](?!(example|sample|dist|template|beispiel|vorlage|muster)$).*)$/i,   // .envrc, .env~, .env-prod, .env_local
   /^(\.npmrc|\.netrc|\.pypirc|\.git-credentials|credentials(\.json)?)$/i,
   /^service[-_]?account.*\.json$/i,
   /\.(hex|key|p12|pfx|p8|jks|keystore|ppk|keychain|keychain-db)$/i,
@@ -60,6 +63,8 @@ export const nameNorm = (n) => String(n).replace(/\\/g, '/').normalize('NFC');
  */
 export function inhaltGesperrt(roh, { archiv = true } = {}) {
   const n = nameNorm(roh);
+  // Steuerzeichen (NUL, Zeilenumbruch …): Entpacker schneiden dort ab – „.env.local\0.example“ würde zu .env.local (Prüfung 1.15.3)
+  if (/[\u0000-\u001f\u007f]/.test(n)) return 'Steuerzeichen im Namen';
   const teile = n.split('/').filter((t) => t && t !== '.');
   if (!teile.length) return null;
   const istOrdner = n.endsWith('/');
@@ -302,8 +307,8 @@ export class Ablage {
     const regeln = verboten.map((v) => nameNorm(v).trim().toLowerCase()).filter(Boolean);
     const funde = [];
     const dazu = (t) => { if (funde.length < 8) funde.push(t); };
-    const namePruefen = (n) => {
-      const g = inhaltGesperrt(n, { archiv: false });
+    const namePruefen = (n, pruefname = n) => {
+      const g = inhaltGesperrt(pruefname, { archiv: false });
       if (g) return dazu(`${n} (${g})`);
       const v = regeln.find((x) => nameNorm(n).toLowerCase().includes(x));
       if (v) dazu(`${n} (für dieses Projekt verboten: ${v})`);
@@ -321,7 +326,8 @@ export class Ablage {
         if (e.groesse > 64 * 1024 * 1024) { dazu(`${e.pfad} (Archiv zu groß für die Prüfung)`); continue; }
         let tar;
         try { tar = zlib.gunzipSync(await isoLesen(f.fh, e), { maxOutputLength: 512 * 1024 * 1024 }); } catch { dazu(`${e.pfad} (Archiv nicht lesbar)`); continue; }
-        for (const t of tarEintraege(tar)) { namePruefen(`${e.pfad}:${t.name}`); if (t.daten) textPruefen(`${e.pfad}:${t.name}`, t.daten); }
+        // Name mit „/“ prüfen: mit „:“ wäre „app.tar.gz:.env“ ein einziger Dateiname und .env an der tar-Wurzel rutschte durch (1.15.3)
+        for (const t of tarEintraege(tar)) { namePruefen(`${e.pfad}:${t.name}`, `${e.pfad}/${t.name}`); if (t.daten) textPruefen(`${e.pfad}:${t.name}`, t.daten); }
       } else if (e.groesse <= 2 * 1024 * 1024) textPruefen(e.pfad, await isoLesen(f.fh, e));
     }
     if (!eintraege.some((e) => /^fahnas\//i.test(e.pfad))) dazu('ISO ohne /fahnas – keine FAH-NAS-Installer-ISO?');
