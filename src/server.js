@@ -245,10 +245,11 @@ export function erstelleServer({ daten, oeffentlicheAdresse = '', github: github
     const r = meta.releases || {};
     const dateien = await Promise.all((r.dateien || []).map(async (d, nr) => {
       const i = await ablage.info(d).catch(() => ({ rel: d, name: path.posix.basename(d), fehlt: true }));
-      return { nr, ...i, oeffentlich: r.oeffentlich === d, ...(ich.admin ? {} : { rel: undefined }) };
+      return { nr, ...i, oeffentlich: r.oeffentlich === d, version: i.zeit ? versionAusZeit(i.zeit) : null, ...(ich.admin ? {} : { rel: undefined }) };
     }));
     const lauf = ich.admin ? releaseLaeufe.get(meta.__pfad) : null;
     return { ablage: await ablage.da(), dateien, oeffentlich: ich.admin ? r.oeffentlich || null : !!r.oeffentlich, verboten: ich.admin ? r.verboten || [] : [],
+      auto: r.auto === true, auto_fehler: ich.admin && r.autoFehler ? r.autoFehler : null,
       lauf: lauf && auftraege.has(lauf.id) ? lauf : null };
   }
 
@@ -290,11 +291,109 @@ export function erstelleServer({ daten, oeffentlicheAdresse = '', github: github
     const id = crypto.randomBytes(6).toString('hex');
     const a = { id, art, status: 'laeuft', meldungen: [], ergebnis: null, fehler: null, start: new Date().toISOString() };
     auftraege.set(id, a);
-    arbeit((t) => { a.meldungen.push(t); if (a.meldungen.length > 200) a.meldungen.shift(); }, a)
+    const ende = arbeit((t) => { a.meldungen.push(t); if (a.meldungen.length > 200) a.meldungen.shift(); }, a)
       .then((e) => { a.status = 'fertig'; a.ergebnis = e; })
       .catch((e) => { a.status = 'fehler'; a.fehler = e.message; a.fehler_status = e.status || 500; })
       .finally(() => { a.ende = new Date().toISOString(); setTimeout(() => auftraege.delete(id), 3600_000).unref?.(); });
+    Object.defineProperty(a, 'fertig', { value: ende, enumerable: false });      // intern abwartbar, nicht in der Antwort
     return a;
+  }
+
+  /**
+   * Die als „öffentlich“ gewählte Datei der Ablage als Release veröffentlichen – als Auftrag mit Fortschritt (1.14.0).
+   * Gemeinsam für den Knopf und die Automatik (1.16.0).
+   */
+  function releaseAusAblageStarten(pfad, s, r, { version, titel, text, ich }) {
+    const a = auftragStarten('release', async (melde, a) => {
+      a.projekt = pfad; a.spiegel = s.id; a.repo = s.repo; a.datei = path.posix.basename(r.oeffentlich);
+      a.fortschritt = { phase: 'pruefen', erledigt: 0, gesamt: 0, seit: Date.now() };
+      // EIN Griff auf die Datei: geprüft und hochgeladen wird genau dasselbe, auch wenn die Ablage sich dazwischen ändert
+      const f = await ablage.oeffnen(r.oeffentlich);
+      let strom = null;
+      try {
+        a.fortschritt.gesamt = f.groesse;
+        // Private Regeln des GitHub-Spiegels auch auf die Inhalte anwenden (Begriffe selbst nie ausgeben)
+        const bg = await bereinigungLesen();
+        const verbotenAlle = [...new Set([...(bg.verboten || []), ...ersetzenVorbereiten(bg.ersetzen || []).filter((x) => x.klartext && x.klartext.trim().length >= 4).map((x) => x.klartext.trim())])];
+        const textPruefer = (rel, text) => textPruefen(text, rel, verbotenAlle).filter((x) => ['privat', 'schluessel', 'token'].includes(x.art))
+          .map((x) => `${x.art === 'privat' ? 'privater Begriff laut Bereinigung' : x.text}, Zeile ${x.zeile}`);
+        await ablage.oeffentlichPruefen(f, r.verboten || [], { textPruefer, fortschritt: (n) => { a.fortschritt.erledigt = n; } });
+        const vorher = await f.fh.stat();
+        if (f.groesse > 2 * 1024 * 1024 * 1024 - 1) throw new HttpFehler(413, 'GitHub nimmt je Release-Datei höchstens 2 GB');
+        if (!/^[A-Za-z0-9][A-Za-z0-9 ._()-]{0,150}$/.test(f.name)) throw new HttpFehler(400, 'Dateiname: Buchstaben, Ziffern, Leerzeichen, Punkt, Minus, Klammern');
+        const tag = version || versionAusZeit(f.zeit);
+        a.version = tag;
+        a.fortschritt = { phase: 'hochladen', erledigt: 0, gesamt: f.groesse, seit: Date.now() };
+        strom = f.fh.createReadStream({ start: 0, end: f.groesse - 1, autoClose: false, highWaterMark: 1024 * 1024 });
+        const zaehler = new Transform({ transform(teil, _k, weiter) { a.fortschritt.erledigt += teil.length; weiter(null, teil); } });
+        pipeline(strom, zaehler, () => {});
+        const nachDemHochladen = async () => {
+          a.fortschritt.phase = 'abschluss';
+          const n = await f.fh.stat();
+          if (n.size !== vorher.size || n.mtimeMs !== vorher.mtimeMs || n.ctimeMs !== vorher.ctimeMs) throw new HttpFehler(409, 'Die Datei wurde während des Hochladens verändert – Release zurückgenommen');
+        };
+        const e = await releaseVeroeffentlichen(pfad, s, { tag, titel, text, datei: f.name, strom: zaehler, groesse: f.groesse, ich, quelle: r.oeffentlich, nachDemHochladen });
+        a.fortschritt.phase = 'fertig';
+        return e;
+      } finally { if (strom) strom.destroy(); await f.fh.close().catch(() => {}); }
+    });
+    releaseLaeufe.set(pfad, a);
+    return a;
+  }
+
+  /**
+   * Automatisch veröffentlichen (1.16.0, Betreiber 27.11.2026: „für apps muss das immer automatisch passieren und nicht
+   * immer ständig nacharbeiten zu müssen“): Liegt in der Ablage eine neue Fassung der öffentlichen Datei eines Projekts mit
+   * „automatisch“, geht sie mit denselben Prüfungen wie beim Knopf als Release raus. Die Fassung erkennt FAH-Git an ihrem
+   * Stand (Version = Datum/Uhrzeit der Datei). Eine Datei, die sich in den letzten 2 Minuten geändert hat, wird evtl. noch
+   * kopiert und wartet. Scheitert eine Fassung (z. B. Fund bei der Prüfung), steht das in der Aktivität und am Projekt;
+   * dieselbe Fassung wird nicht noch einmal versucht – erst die nächste.
+   */
+  const AUTOMATIK = { name: 'fah-git', anzeige: 'FAH-Git (automatisch)', admin: true };
+  let automatikLaeuft = false;
+  async function releasesAutomatisch() {
+    if (automatikLaeuft || ersatz) return [];
+    automatikLaeuft = true;
+    const erledigt = [];
+    try {
+      if (!(await githubZugang()) || !(await ablage.da())) return erledigt;
+      const meta = await baum.meta();
+      for (const [pfad, p] of Object.entries(meta.projekte)) {
+        const r = p.releases || {};
+        if (r.auto !== true || !r.oeffentlich) continue;
+        const s = (p.spiegel || []).find((x) => x.art === 'github' && x.modus === 'oeffentlich' && x.aktiv !== false && x.zuletzt && x.zuletzt.ergebnis === 'ok');
+        if (!s) continue;
+        const lauf = releaseLaeufe.get(pfad);
+        if (lauf && lauf.status === 'laeuft') continue;
+        const info = await ablage.info(r.oeffentlich).catch(() => null);
+        if (!info || info.fehlt || info.gesperrt || Date.now() - new Date(info.zeit).getTime() < 120_000) continue;
+        const version = versionAusZeit(info.zeit);
+        const letztes = (s.releases || [])[0];
+        if (letztes && letztes.quelle === r.oeffentlich && letztes.tag === version) continue;
+        if (r.autoFehler && r.autoFehler.datei === r.oeffentlich && r.autoFehler.version === version) continue;
+        const a = releaseAusAblageStarten(pfad, s, r, { version, ich: AUTOMATIK });
+        await a.fertig;
+        await baum.projektAendern(pfad, (x) => {
+          if (!x.releases) return;
+          if (a.status === 'fehler') x.releases.autoFehler = { datei: r.oeffentlich, version, fehler: String(a.fehler || '').slice(0, 1000), zeit: new Date().toISOString() };
+          else delete x.releases.autoFehler;
+        });
+        if (a.status === 'fehler') {
+          aktivitaet.melden({ art: 'spiegel', projekt: pfad, nutzer: AUTOMATIK.name, anzeige: AUTOMATIK.anzeige, ergebnis: 'fehler',
+            text: `GitHub ${s.repo}: automatisches Release ${version} gestoppt – ${a.fehler}` });
+        }
+        erledigt.push({ projekt: pfad, version, status: a.status, fehler: a.fehler || null });
+      }
+    } finally { automatikLaeuft = false; }
+    return erledigt;
+  }
+  let automatikUhr = null;
+  function automatikStarten() {
+    if (automatikUhr || ersatz) return;
+    const lauf = () => releasesAutomatisch().catch((e) => console.error('Release-Automatik:', e.message));
+    setTimeout(lauf, 60_000).unref?.();
+    automatikUhr = setInterval(lauf, 5 * 60_000);
+    automatikUhr.unref?.();
   }
 
   // --- Schnittstelle --------------------------------------------------------------------------------------------
@@ -669,10 +768,17 @@ export function erstelleServer({ daten, oeffentlicheAdresse = '', github: github
       }
       if (!Array.isArray(b.verboten || []) || (b.verboten || []).length > 20) throw new HttpFehler(400, 'Verboten: Liste mit höchstens 20 Einträgen');
       const verboten = (b.verboten || []).map((v) => String(v).trim().slice(0, 100)).filter(Boolean);
-      await baum.projektAendern(pfad, (p) => { p.releases = { dateien, oeffentlich, verboten }; });
+      let auto = false;
+      await baum.projektAendern(pfad, (p) => {
+        const alt = p.releases || {};
+        auto = b.auto === undefined ? alt.auto === true : b.auto === true;
+        p.releases = { dateien, oeffentlich, verboten, ...(auto ? { auto: true } : {}),
+          // ein Fehler gilt nur für die Datei, bei der er auftrat
+          ...(alt.autoFehler && alt.autoFehler.datei === oeffentlich ? { autoFehler: alt.autoFehler } : {}) };
+      });
       aktivitaet.melden({ art: 'projekt', projekt: pfad, nutzer: ich.name, anzeige: ich.anzeige,
         text: `Releases: ${dateien.length} Datei(en) zugeordnet${oeffentlich ? `, öffentlich: ${path.posix.basename(oeffentlich)}` : ', keine öffentlich'}` });
-      return json(res, 200, await releasesDaten({ releases: { dateien, oeffentlich, verboten } }, ich));
+      return json(res, 200, await releasesDaten({ releases: { dateien, oeffentlich, verboten, auto } }, ich));
     }
     if (weg === '/release-datei' && m === 'GET') {
       // Herunterladen per Nummer der Zuordnung (Leser kennen keine Pfade der Ablage)
@@ -901,40 +1007,14 @@ export function erstelleServer({ daten, oeffentlicheAdresse = '', github: github
       if (wunsch && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,60}$/.test(wunsch)) throw new HttpFehler(400, 'Version: Buchstaben, Ziffern, Punkt, Minus (z. B. 2026.11.20 oder v1.2.0)');
       const alt = releaseLaeufe.get(pfad);
       if (alt && alt.status === 'laeuft' && auftraege.has(alt.id)) throw new HttpFehler(409, 'Für dieses Projekt läuft schon eine Veröffentlichung');
-      const a = auftragStarten('release', async (melde, a) => {
-        a.projekt = pfad; a.spiegel = s.id; a.repo = s.repo; a.datei = path.posix.basename(r.oeffentlich);
-        a.fortschritt = { phase: 'pruefen', erledigt: 0, gesamt: 0, seit: Date.now() };
-        // EIN Griff auf die Datei: geprüft und hochgeladen wird genau dasselbe, auch wenn die Ablage sich dazwischen ändert
-        const f = await ablage.oeffnen(r.oeffentlich);
-        let strom = null;
-        try {
-          a.fortschritt.gesamt = f.groesse;
-          // Private Regeln des GitHub-Spiegels auch auf die Inhalte einer ISO anwenden (Begriffe selbst nie ausgeben)
-          const bg = await bereinigungLesen();
-          const verbotenAlle = [...new Set([...(bg.verboten || []), ...ersetzenVorbereiten(bg.ersetzen || []).filter((x) => x.klartext && x.klartext.trim().length >= 4).map((x) => x.klartext.trim())])];
-          const textPruefer = (rel, text) => textPruefen(text, rel, verbotenAlle).filter((x) => ['privat', 'schluessel', 'token'].includes(x.art))
-            .map((x) => `${x.art === 'privat' ? 'privater Begriff laut Bereinigung' : x.text}, Zeile ${x.zeile}`);
-          await ablage.oeffentlichPruefen(f, r.verboten || [], { textPruefer, fortschritt: (n) => { a.fortschritt.erledigt = n; } });
-          const vorher = await f.fh.stat();
-          if (f.groesse > 2 * 1024 * 1024 * 1024 - 1) throw new HttpFehler(413, 'GitHub nimmt je Release-Datei höchstens 2 GB');
-          if (!/^[A-Za-z0-9][A-Za-z0-9 ._()-]{0,150}$/.test(f.name)) throw new HttpFehler(400, 'Dateiname: Buchstaben, Ziffern, Leerzeichen, Punkt, Minus, Klammern');
-          const tag = wunsch || versionAusZeit(f.zeit);
-          a.version = tag;
-          a.fortschritt = { phase: 'hochladen', erledigt: 0, gesamt: f.groesse, seit: Date.now() };
-          strom = f.fh.createReadStream({ start: 0, end: f.groesse - 1, autoClose: false, highWaterMark: 1024 * 1024 });
-          const zaehler = new Transform({ transform(teil, _k, weiter) { a.fortschritt.erledigt += teil.length; weiter(null, teil); } });
-          pipeline(strom, zaehler, () => {});
-          const nachDemHochladen = async () => {
-            a.fortschritt.phase = 'abschluss';
-            const n = await f.fh.stat();
-            if (n.size !== vorher.size || n.mtimeMs !== vorher.mtimeMs || n.ctimeMs !== vorher.ctimeMs) throw new HttpFehler(409, 'Die Datei wurde während des Hochladens verändert – Release zurückgenommen');
-          };
-          const e = await releaseVeroeffentlichen(pfad, s, { tag, titel: b.titel, text: b.text, datei: f.name, strom: zaehler, groesse: f.groesse, ich, quelle: r.oeffentlich, nachDemHochladen });
-          a.fortschritt.phase = 'fertig';
-          return e;
-        } finally { if (strom) strom.destroy(); await f.fh.close().catch(() => {}); }
-      });
-      releaseLaeufe.set(pfad, a);
+      // 1.16.0: Dieser Stand ist schon das Release auf GitHub → kein Fehler „gibt es schon“, sondern „schon aktuell“
+      const info = await ablage.info(r.oeffentlich);
+      const letztes = (s.releases || [])[0];
+      if (!wunsch && info.zeit && letztes && letztes.quelle === r.oeffentlich && letztes.tag === versionAusZeit(info.zeit)) {
+        releaseLaeufe.delete(pfad);
+        return json(res, 200, { schon: true, version: letztes.tag, url: letztes.url });
+      }
+      const a = releaseAusAblageStarten(pfad, s, r, { version: wunsch || null, titel: b.titel, text: b.text, ich });
       return json(res, 202, { auftrag: a.id });
     }
     if (weg === '/github/sichtbarkeit' && m === 'POST') {
@@ -1082,15 +1162,15 @@ export function erstelleServer({ daten, oeffentlicheAdresse = '', github: github
   });
   server.requestTimeout = 0; // große Pushes dürfen dauern
   server.headersTimeout = 60_000;
-  return { server, speicher, baum, konten, spiegel, aktivitaet, sicherung, ersatz, failoverHaupt, rolle };
+  return { server, speicher, baum, konten, spiegel, aktivitaet, sicherung, ersatz, failoverHaupt, rolle, releasesAutomatisch, automatikStarten };
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
   const port = Number(process.env.PORT || 3300);
-  const { server, spiegel, sicherung, ersatz } = erstelleServer({ daten: process.env.FAHGIT_DATEN || '/daten', oeffentlicheAdresse: process.env.FAHGIT_ADRESSE || '' });
+  const { server, spiegel, sicherung, ersatz, automatikStarten } = erstelleServer({ daten: process.env.FAHGIT_DATEN || '/daten', oeffentlicheAdresse: process.env.FAHGIT_ADRESSE || '' });
   // Der Ersatz leitet nichts weiter und sichert nicht (sonst doppelte Pushes und Sicherungen in dasselbe NAS-Ziel).
   if (ersatz) ersatz.starten();
-  else { spiegel.starten(); sicherung.starten(); }
+  else { spiegel.starten(); sicherung.starten(); automatikStarten(); }   // Release-Automatik (1.16.0) nur am Haupt
   server.listen(port, () => console.log(`FAH-Git ${VERSION} hört auf Port ${port}${ersatz ? ' (Fail-over, nur lesen)' : ''}`));
   const ende = () => { spiegel.stoppen(); sicherung.stoppen(); ersatz?.stoppen(); server.close(() => process.exit(0)); setTimeout(() => process.exit(0), 5000).unref(); };
   process.on('SIGTERM', ende); process.on('SIGINT', ende);

@@ -58,7 +58,10 @@ Textdateien direkt im Browser bearbeiten – „Bearbeiten“, tippen, speichern
   aus der Ablage zu (Ordner durchklicken, ankreuzen) und wählen eine ZIP als „öffentlich“; alle mit Leserecht sehen Name,
   Größe und Stand und können herunterladen (ohne Pfade der Ablage). „Auf GitHub veröffentlichen“ schickt die öffentliche
   ZIP ohne Hochladen als Release zu GitHub (Version = Datum/Uhrzeit der Datei, z. B. `2026.11.27-0928`; ältere Releases
-  und Tags werden danach entfernt).
+  und Tags werden danach entfernt). Seit 1.16.0 geht das auf Wunsch von selbst („Neue Fassungen automatisch veröffentlichen“
+  im Reiter Releases): Liegt eine neue Fassung der öffentlichen Datei in der Ablage (älter als 2 Minuten), prüft und
+  veröffentlicht FAH-Git sie innerhalb von 5 Minuten; scheitert eine Fassung, steht der Grund am Projekt und in der Aktivität.
+  Ist der Stand schon das Release auf GitHub, meldet der Knopf „schon aktuell“.
   Schutz: Namen nach Schlüssel/Privatem („NICHT VERTEILEN“, „privat“, „Nur für …“, „API KEYS“, `.hex`, `.pem` …) sind
   gesperrt; keine Verweise/harten Links, Pfade bleiben in der Ablage. ZIPs werden über Inhaltsverzeichnis UND Dateiköpfe
   lückenlos gelesen; ZIPs mit Schlüssel- oder Zugangsdateien bzw. `.git`-Ordner lassen sich gar nicht zuordnen (`.env`-Vorlagen wie `.env.example` oder `.env.edeka.example` sind erlaubt, solange der Name auf die Vorlagen-Endung endet – 1.15.3). Vor dem

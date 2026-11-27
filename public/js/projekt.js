@@ -574,18 +574,39 @@ function releasesAnsicht(p, admin) {
     h('td', { class: 'schwach', style: 'white-space:nowrap' }, d.zeit ? datumZeit(d.zeit) : '–'),
     h('td', { style: 'text-align:right' }, !d.gesperrt && !d.fehlt
       ? h('a', { class: 'knopf klein', href: `/api/release-datei?${q({ pfad: p.pfad, nr: String(d.nr) })}`, download: d.name }, sym('laden'), 'Herunterladen') : null));
+  // 1.16.0: Ist der Stand der öffentlichen Datei schon das Release auf GitHub? Dann kein Knopf-Zwang und kein alter Fehler.
+  const oeff = r.dateien.find((d) => d.oeffentlich);
+  const aktuell = (s) => { const x = (s.releases || [])[0]; return !!(x && oeff && x.quelle === r.oeffentlich && x.tag === oeff.version); };
+  const lauf = r.lauf && r.lauf.status === 'fehler' && ziele.some(aktuell) ? null : r.lauf;
+  const autoSetzen = async (an) => {
+    try { await api('PUT', '/releases', { pfad: p.pfad, dateien: r.dateien.map((d) => d.rel), oeffentlich: r.oeffentlich, verboten: r.verboten, auto: an }); meldung(an ? 'Neue Fassungen gehen ab jetzt automatisch raus' : 'Automatik aus'); location.reload(); }
+    catch (e) { fehlerMelden(e); }
+  };
+  const stand = admin && oeff && ziele.length ? h('div', { style: 'margin-top:8px' },
+    ziele.map((s) => {
+      const x = (s.releases || [])[0];
+      return h('p', { class: 'klein', style: 'margin:4px 0' }, aktuell(s)
+        ? [h('span', { class: 'marker gruen' }, sym('haken'), 'aktuell'), ` Auf GitHub ${s.repo}: Release `, h('a', { href: x.url, target: '_blank', rel: 'noopener' }, x.tag), ` = ${oeff.name} vom ${datumZeit(oeff.zeit)}`]
+        : [h('span', { class: 'marker warn' }, sym('warnung'), 'neu'), ` ${oeff.name} vom ${datumZeit(oeff.zeit)} ist noch nicht auf GitHub ${s.repo}`,
+          r.auto ? ' – geht in den nächsten Minuten automatisch raus.' : '.', x ? h('span', { class: 'schwach' }, ` (dort: ${x.tag})`) : null]);
+    }),
+    h('label', { class: 'haken', style: 'margin-top:6px' }, h('input', { type: 'checkbox', checked: !!r.auto, onchange: (e) => autoSetzen(e.target.checked) }),
+      h('span', {}, 'Neue Fassungen automatisch veröffentlichen'), h('span', { class: 'schwach klein' }, ' – liegt eine neue Fassung der öffentlichen Datei in der Ablage, geht sie mit denselben Prüfungen von selbst zu GitHub')),
+    r.auto_fehler ? h('div', { class: 'hinweisbox rot', style: 'margin-top:8px' }, sym('warnung'), h('div', {}, `Automatik gestoppt bei ${r.auto_fehler.version}: ${r.auto_fehler.fehler} – die nächste Fassung wird wieder versucht.`)) : null) : null;
   return h('div', {},
     h('div', { class: 'karte abschnitt' },
       h('div', { class: 'karten-kopf' }, h('h2', {}, 'Releases'),
         admin ? h('div', { class: 'zeile ende' },
-          r.oeffentlich && ziele.length ? ziele.map((s) => h('button', { class: 'knopf haupt klein', type: 'button', onclick: () => releaseAusAblage(p, s) }, sym('schild'), ziele.length > 1 ? `Auf GitHub ${s.repo} veröffentlichen …` : 'Auf GitHub veröffentlichen …')) : null,
+          r.oeffentlich && ziele.length ? ziele.map((s) => h('button', { class: aktuell(s) ? 'knopf klein' : 'knopf haupt klein', type: 'button', onclick: () => releaseAusAblage(p, s, aktuell(s)) }, sym('schild'),
+            aktuell(s) ? 'Mit eigener Version veröffentlichen …' : ziele.length > 1 ? `Auf GitHub ${s.repo} veröffentlichen …` : 'Auf GitHub veröffentlichen …')) : null,
           h('button', { class: 'knopf klein', type: 'button', onclick: () => releasesZuordnen(p) }, sym('bearbeiten'), 'Dateien zuordnen …')) : null),
       h('div', { class: 'karten-inhalt' },
         info('Fertige Dateien (ZIP, ISO, PDF …) aus der Release-Ablage auf dem NAS – FAH-Git liest sie nur und lädt nichts hoch. Die als „öffentlich“ gewählte Datei geht mit einem Klick als Release zu GitHub; dort bleibt nur das neueste.'),
         !r.ablage ? h('div', { class: 'hinweisbox warn', style: 'margin-top:8px' }, sym('warnung'), h('div', {}, 'Die Release-Ablage ist nicht eingebunden (in der .env von FAH-Git: ABLAGE=<Ordner auf dem NAS>).')) : null,
         r.verboten.length ? h('p', { class: 'klein' }, 'Darf nicht in der öffentlichen Datei stecken: ', r.verboten.map((v) => h('code', { style: 'margin-right:6px' }, v))) : null,
         admin && r.oeffentlich && !ziele.length ? h('p', { class: 'klein schwach' }, 'Zum Veröffentlichen braucht das Projekt eine GitHub-Weiterleitung „Öffentlicher Stand“, die schon einmal sauber übertragen hat (Reiter Spiegel).') : null,
-        admin && r.lauf ? releaseFortschritt(r.lauf) : null),
+        stand,
+        admin && lauf ? releaseFortschritt(lauf) : null),
       r.dateien.length ? h('table', { class: 'tabelle' }, h('tr', {}, h('th', {}, 'Datei'), h('th', {}, 'Größe'), h('th', {}, 'Stand'), h('th', {})), r.dateien.map(zeile))
         : h('div', { class: 'leer-hinweis' }, admin ? 'Noch keine Dateien zugeordnet – „Dateien zuordnen …“ wählt sie aus der Ablage.' : 'Keine Release-Dateien.')));
 }
@@ -641,10 +662,11 @@ async function releasesZuordnen(p) {
 }
 
 /** Die als „öffentlich“ gewählte Datei als GitHub-Release veröffentlichen (ohne Hochladen). */
-async function releaseAusAblage(p, s) {
+async function releaseAusAblage(p, s, schonAktuell = false) {
   const d = p.releases.dateien.find((x) => x.oeffentlich);
   if (!d) { fehlerMelden(new Error('Keine öffentliche Datei gewählt')); return; }
-  const version = h('input', { type: 'text', autocomplete: 'off', placeholder: 'leer = Stand der Datei, z. B. 2026.11.27-0928' });
+  const version = h('input', { type: 'text', autocomplete: 'off', required: schonAktuell,
+    placeholder: schonAktuell ? `Dieser Stand ist schon online (${d.version}) – andere Version eintragen` : `leer = Stand der Datei (${d.version || 'z. B. 2026.11.27-0928'})` });
   const titel = h('input', { type: 'text', placeholder: `${p.name} – Version …` });
   const text = h('textarea', { rows: 3, placeholder: 'Was ist neu? (optional)' });
   const r = await dialog(`Release für GitHub ${s.repo}`, h('div', {},
@@ -658,6 +680,7 @@ async function releaseAusAblage(p, s) {
     info('Läuft im Hintergrund: Fortschritt mit Restzeit im Reiter Releases und in der Spiegel-Zeile – auch nach dem Neuladen der Seite. Danach bleibt auf GitHub nur dieses neueste Release: ältere Releases und ihre Tags löscht FAH-Git nach dem Hochladen.')),
   [{ text: 'Abbrechen' }, { text: 'Veröffentlichen', art: 'haupt', aktion: () => api('POST', '/github/release-ablage',
     { pfad: p.pfad, id: s.id, version: version.value.trim(), titel: titel.value.trim(), text: text.value.trim() }) }]);
+  if (r && r.schon) { meldung(`Schon auf GitHub: Release ${r.version} ist genau dieser Stand`); location.reload(); return; }
   if (r && r.auftrag) { meldung(`${d.name} geht zu GitHub – Fortschritt im Reiter Releases`); location.hash = url(p, 'releases'); setTimeout(() => location.reload(), 300); }
 }
 
