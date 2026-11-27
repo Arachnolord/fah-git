@@ -4,3 +4,5 @@ daten/
 *.zip
 !tools/*.zip
 .DS_Store
+paket-manifest.txt
+paket-signatur

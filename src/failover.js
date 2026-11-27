@@ -23,8 +23,10 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 import { git, gitText } from './git.js';
 import { SEGMENT } from './baum.js';
+import { manifestLesen, nachManifest, nameGueltig, ordnerPruefen, signaturGueltig } from './paket.js';
 
 export const ORDNER = '_failover';
 const CODE_PRAEFIX = 'fgfo_';
@@ -46,6 +48,16 @@ const BILD_NAME = /^[a-z0-9][a-z0-9._-]{0,99}$/i;
 const PFLICHT = ['nutzer.json'];
 const NIE_LOESCHEN = new Set([...PFLICHT, 'meta.json', 'einstellungen.json', 'geheim.key']);
 const SHA = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
+const PAKET_NEUVERSUCH_MS = 10 * 60_000;
+const UPDATE_WARTET_MS = 15 * 60_000;
+/** „::ffff:10.0.0.5“ (IPv4 in IPv6-Schreibweise) → „10.0.0.5“. */
+const adresseLesbar = (a) => String(a || '').replace(/^::ffff:/i, '');
+/** Ist Version a neuer als b? (x.y.z) */
+export function neuer(a, b) {
+  const x = String(a).split('.').map(Number); const y = String(b).split('.').map(Number);
+  for (let i = 0; i < 3; i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0);
+  return false;
+}
 
 export class FailoverFehler extends Error {
   constructor(text, status = 400) { super(text); this.status = status; }
@@ -227,10 +239,12 @@ const repoOrdner = (wurzel, pfad) => { const t = pfad.split('/'); return path.jo
 // --- Haupt ---------------------------------------------------------------------------------------------------------
 
 export class FailoverHaupt {
-  /** @param {{speicher: import('./speicher.js').Speicher, version: string}} o */
-  constructor({ speicher, version }) {
+  /** @param {{speicher: import('./speicher.js').Speicher, version: string, app?: string}} o */
+  constructor({ speicher, version, app = null }) {
     this.speicher = speicher;
     this.version = version;
+    this.app = app;
+    this._paket = null;
     this.einmal = new Map();
     this.gitZugaenge = new Map();
     this.ersatz = null;
@@ -273,8 +287,9 @@ export class FailoverHaupt {
     let b = {};
     try { b = JSON.parse(Buffer.from(bericht, 'base64url').toString('utf8')) || {}; } catch { /* ohne Bericht */ }
     const text = (v, n) => (v == null ? null : String(v).slice(0, n));
-    this.ersatz = { quelle: text(quelle, 64), zeit: new Date().toISOString(), version: text(b.version, 20), gesamt: text(b.gesamt, 64),
-      zuletzt: text(b.zuletzt, 40), fehler: text(b.fehler, 400), adresse: text(b.adresse, 200) };
+    this.ersatz = { quelle: text(adresseLesbar(quelle), 64), zeit: new Date().toISOString(), version: text(b.version, 20), gesamt: text(b.gesamt, 64),
+      zuletzt: text(b.zuletzt, 40), fehler: text(b.fehler, 400), adresse: /^https?:\/\//.test(String(b.adresse || '')) ? text(b.adresse, 200) : null,
+      update: text(b.update, 300) };
     return { schluessel, einmal };
   }
 
@@ -318,6 +333,24 @@ export class FailoverHaupt {
     return wert;
   }
 
+  /**
+   * Das beim ZIP-Bau unterschriebene Release dieses Haupts (paket-manifest.txt + paket-signatur im App-Ordner) samt der
+   * Dateien, die es nennt. Der Haupt unterschreibt nichts selbst – er reicht nur weiter, was er unverändert ausführt.
+   */
+  paket() {
+    if (this._paket) return this._paket;
+    let text; let signatur;
+    try {
+      text = fs.readFileSync(path.join(this.app || '', 'paket-manifest.txt'), 'utf8');
+      signatur = fs.readFileSync(path.join(this.app || '', 'paket-signatur'), 'utf8').trim();
+    } catch { throw new FailoverFehler('Dieser Haupt läuft ohne unterschriebenes Release (ZIP mit tools/baue_zip.sh ab 1.15.0 bauen)', 404); }
+    let r;
+    try { r = nachManifest(this.app, text); } catch (e) { throw new FailoverFehler(`Release des Haupts unbrauchbar: ${e.message}`, 404); }
+    if (r.version !== this.version) throw new FailoverFehler(`Release-Manifest (${r.version}) passt nicht zur laufenden Version ${this.version}`, 404);
+    this._paket = { version: this.version, manifest: text, signatur, dateien: r.dateien.map((d) => ({ name: d.name, inhalt: d.inhalt.toString('base64') })) };
+    return this._paket;
+  }
+
   async dateien() {
     const daten = this.speicher.ordner;
     const liste = []; let summe = 0; const abdruck = [];
@@ -346,8 +379,9 @@ export class FailoverHaupt {
 // --- Ersatz --------------------------------------------------------------------------------------------------------
 
 export class FailoverErsatz {
-  /** @param {{speicher: import('./speicher.js').Speicher, baum: import('./baum.js').Baum, version: string, env?: object}} o */
-  constructor({ speicher, baum, version, env = process.env }) {
+  /** @param {{speicher: import('./speicher.js').Speicher, baum: import('./baum.js').Baum, version: string, env?: object, releaseSchluessel?: string}} o */
+  constructor({ speicher, baum, version, env = process.env, releaseSchluessel }) {
+    this.releaseSchluessel = releaseSchluessel;
     this.speicher = speicher;
     this.baum = baum;
     this.version = version;
@@ -413,7 +447,8 @@ export class FailoverErsatz {
     const zeit = String(Date.now());
     const einmal = crypto.randomBytes(18).toString('base64url');
     const bericht = b64u(JSON.stringify({ version: this.version, gesamt: this.letzter.gesamt, zuletzt: this.zustand.zuletzt,
-      fehler: this.zustand.fehler || (this.zustand.repoFehler.length ? `${this.zustand.repoFehler.length} Projekt(e) nicht geholt` : null), adresse: this.env.adresse || null }));
+      fehler: this.zustand.fehler || (this.zustand.repoFehler.length ? `${this.zustand.repoFehler.length} Projekt(e) nicht geholt` : null), adresse: this.env.adresse || null,
+      update: this.updateText() }));
     let r;
     try {
       r = await fetch(k.haupt + weg, { headers: { 'x-fahgit-failover': `${zeit}.${einmal}.${unterschrift(k.schluessel, zeit, einmal, 'GET', weg, bericht)}`, 'x-fahgit-ersatz': bericht },
@@ -504,7 +539,84 @@ export class FailoverErsatz {
     this.letzter.zuletzt = this.zustand.zuletzt;
     this.letzter.haupt_version = s.version;
     await this._schreiben('stand.json', this.letzter);
+    // 4. Neue Version am Haupt? Paket holen und für manage.sh (Zeitplaner am Rechner) bereitlegen. Nie fatal für den Abgleich.
+    try { await this.updatePruefen(k, s); } catch (e) { this.zustand.update = { version: s.version, fehler: String(e.message || e).slice(0, 300) }; }
     return { gekoppelt: true, repos: repos.length, fehler: echt };
+  }
+
+  /** Öffentlicher Release-Schlüssel der INSTALLIERTEN Fassung (src/release-schluessel.txt). */
+  releasePub() {
+    if (this.releaseSchluessel !== undefined) return this.releaseSchluessel;
+    try { return fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'release-schluessel.txt'), 'utf8').trim() || null; } catch { return null; }
+  }
+
+  async updatePruefen(k, s) {
+    const ordner = path.join(this.ordner, 'paket');
+    if (!s.version || s.version === this.version) {
+      // Gleichstand (z. B. nach dem eingespielten Update): Erfolg merken, Reste weg.
+      if (fs.existsSync(ordner)) {
+        const erg = this._json('paket/ergebnis.json', null);
+        if (erg && erg.ok === true && erg.version === this.version) {
+          this.letzter.selbst_update = { version: String(erg.version), zeit: String(erg.zeit || '') };
+          await this._schreiben('stand.json', this.letzter);
+        }
+        await fsp.rm(ordner, { recursive: true, force: true });
+      }
+      this.zustand.update = null;
+      return;
+    }
+    if (!/^\d+\.\d+\.\d+$/.test(String(s.version)) || !neuer(s.version, this.version)) {
+      throw new FailoverFehler(`Haupt hat ${s.version}, hier läuft ${this.version} – zurück geht es nur von Hand`);
+    }
+    const pin = this.releasePub();
+    if (!pin) throw new FailoverFehler('Diese Fassung kennt keinen Release-Schlüssel – Ersatz einmal von Hand aktualisieren');
+    const bereit = this._json('paket/bereit.json', {});
+    if (bereit.version === s.version && fs.existsSync(path.join(ordner, 'aktuell'))) {
+      this.zustand.update = { version: s.version, bereit: bereit.zeit, ergebnis: this._json('paket/ergebnis.json', null) };
+      return;
+    }
+    const v = this._paketVersuch;
+    if (v && v.version === s.version && Date.now() - v.zeit < PAKET_NEUVERSUCH_MS) return;
+    this._paketVersuch = { version: s.version, zeit: Date.now() };
+    const p = await this.anfrage(k, '/api/failover/paket');
+    if (!p || p.version !== s.version || typeof p.manifest !== 'string' || !Array.isArray(p.dateien)) throw new FailoverFehler('Update-Paket des Haupts unvollständig');
+    if (!signaturGueltig(pin, p.manifest, p.signatur)) throw new FailoverFehler('Unterschrift des Update-Pakets ungültig – nichts übernommen');
+    const m = manifestLesen(p.manifest);
+    if (m.version !== s.version || m.eintraege.length !== p.dateien.length) throw new FailoverFehler('Update-Paket passt nicht zu seinem Manifest');
+    const neu = path.join(ordner, `.neu-${crypto.randomBytes(4).toString('hex')}`);
+    try {
+      for (const d of p.dateien) {
+        if (!nameGueltig(d.name) || !m.eintraege.some((e) => e.name === d.name)) throw new FailoverFehler(`Update-Paket: unerwartete Datei ${String(d.name).slice(0, 80)}`);
+        const ziel = path.join(neu, 'dateien', ...d.name.split('/'));
+        await fsp.mkdir(path.dirname(ziel), { recursive: true });
+        await fsp.writeFile(ziel, Buffer.from(String(d.inhalt || ''), 'base64'), { mode: d.name === 'manage.sh' ? 0o755 : 0o644 });
+      }
+      await fsp.writeFile(path.join(neu, 'manifest.txt'), p.manifest);
+      await fsp.writeFile(path.join(neu, 'signatur'), `${p.signatur}\n`);
+      ordnerPruefen(neu, pin, s.version);
+      await fsp.rm(path.join(ordner, 'aktuell'), { recursive: true, force: true });
+      await fsp.rm(path.join(ordner, 'ergebnis.json'), { force: true });
+      await fsp.rename(neu, path.join(ordner, 'aktuell'));
+    } catch (e) { await fsp.rm(neu, { recursive: true, force: true }).catch(() => {}); throw e; }
+    const zeit = new Date().toISOString();
+    await this._schreiben('paket/bereit.json', { version: s.version, zeit });
+    console.log(`Fail-over: Update auf ${s.version} bereitgelegt – manage.sh auto-update spielt es ein`);
+    this.zustand.update = { version: s.version, bereit: zeit, ergebnis: null };
+  }
+
+  /** Kurzer Text zum Update-Stand für Haupt und Oberfläche (null = nichts zu melden). */
+  updateText() {
+    const u = this.zustand.update;
+    if (!u) {
+      const z = this.letzter.selbst_update;
+      if (!z) return null;
+      const wann = Date.parse(z.zeit) ? new Date(z.zeit).toLocaleString('de-DE', { timeZone: 'Europe/Berlin', dateStyle: 'medium', timeStyle: 'short' }) : '';
+      return `Zuletzt selbst aktualisiert auf ${z.version}${wann ? ` (${wann})` : ''}`;
+    }
+    if (u.fehler) return `Update auf ${u.version}: ${u.fehler}`;
+    if (u.ergebnis && u.ergebnis.ok === false) return `Update auf ${u.version} fehlgeschlagen: ${u.ergebnis.text || ''}`.slice(0, 300);
+    if (u.bereit && Date.now() - Date.parse(u.bereit) > UPDATE_WARTET_MS) return `Update auf ${u.version} liegt seit ${Math.round((Date.now() - Date.parse(u.bereit)) / 60_000)} min bereit – läuft am Ersatz-Rechner der Container fah-git-updater? (sonst einmal „./manage.sh zeitplan“)`;
+    return `Update auf ${u.version} liegt bereit, wird gleich eingespielt`;
   }
 
   async papierkorbLeeren() {
@@ -565,7 +677,7 @@ export class FailoverErsatz {
   status() {
     const k = this.kopplung();
     const frisch = !!this.zustand.zuletzt && Date.now() - Date.parse(this.zustand.zuletzt) < AKTUELL_MS;
-    return { rolle: 'ersatz', gekoppelt: !!k, haupt: k ? k.haupt : null, quelle: k ? k.quelle : null, version: this.version,
+    return { rolle: 'ersatz', gekoppelt: !!k, haupt: k ? k.haupt : null, quelle: k ? k.quelle : null, version: this.version, update: this.updateText(),
       haupt_version: this.letzter.haupt_version || null, laeuft: this.zustand.laeuft, zuletzt: this.zustand.zuletzt, versucht: this.zustand.versucht,
       fehler: this.zustand.fehler, repoFehler: this.zustand.repoFehler, gesamt: this.zustand.gesamt, fertig: this.zustand.fertig,
       aktuell: frisch && !!this.letzter.gesamt && !this.zustand.fehler && !this.zustand.repoFehler.length };

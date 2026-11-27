@@ -115,15 +115,15 @@ async function httpBackendDa() {
 }
 
 export function erstelleServer({ daten, oeffentlicheAdresse = '', github: githubOptionen = {}, ablage: ablageOrdner = process.env.FAHGIT_ABLAGE || '/ablage',
-  umgebung = process.env }) {
+  umgebung = process.env, failoverApp = path.join(HIER, '..'), releaseSchluessel }) {
   const speicher = new Speicher(daten);
   const baum = new Baum(speicher);
   // Fail-over (1.14.0): Haupt (Normalfall) oder Ersatz, der sich laufend vom Haupt abgleicht und selbst nichts ändert.
   const rolle = rolleLesen(daten, umgebung);
   // Reste eines abgebrochenen Abgleichs (halbe Neuzugänge, Sperrdateien) vor dem ersten git-Aufruf wegräumen.
   if (rolle.vorgabe === 'ersatz') aufraeumen(speicher.repos);
-  const ersatz = rolle.rolle === 'ersatz' ? new FailoverErsatz({ speicher, baum, version: VERSION, env: umgebung }) : null;
-  const failoverHaupt = ersatz ? null : new FailoverHaupt({ speicher, version: VERSION });
+  const ersatz = rolle.rolle === 'ersatz' ? new FailoverErsatz({ speicher, baum, version: VERSION, env: umgebung, releaseSchluessel }) : null;
+  const failoverHaupt = ersatz ? null : new FailoverHaupt({ speicher, version: VERSION, app: failoverApp });
   const ERSATZ_ERLAUBT = new Set(['/anmelden', '/abmelden', '/failover/koppeln', '/failover/jetzt', '/failover/uebernehmen']);
   const konten = new Konten(speicher);
   const aktivitaet = new Aktivitaet(speicher);
@@ -316,11 +316,12 @@ export function erstelleServer({ daten, oeffentlicheAdresse = '', github: github
     }
 
     // Fail-over: Abfragen des Ersatzes beim Haupt – eigene Unterschrift statt Anmeldung, Antwort verschlüsselt.
-    if (weg === '/failover/stand' || weg === '/failover/dateien') {
+    if (weg === '/failover/stand' || weg === '/failover/dateien' || weg === '/failover/paket') {
       if (m !== 'GET') throw new HttpFehler(405, 'Methode nicht erlaubt');
       if (!failoverHaupt) throw new HttpFehler(404, 'Diese Instanz ist selbst ein Ersatz');
       const { schluessel, einmal } = await failoverHaupt.pruefen(req, absender(req));
-      const wert = weg === '/failover/stand' ? { ...(await failoverHaupt.stand()), git: failoverHaupt.gitZugang(absender(req)) } : await failoverHaupt.dateien();
+      const wert = weg === '/failover/stand' ? { ...(await failoverHaupt.stand()), git: failoverHaupt.gitZugang(absender(req)) }
+        : weg === '/failover/paket' ? failoverHaupt.paket() : await failoverHaupt.dateien();
       return json(res, 200, verpacken(schluessel, einmal, wert), { 'Cache-Control': 'no-store' });
     }
     if (weg === '/failover/koppeln' && m === 'POST') {

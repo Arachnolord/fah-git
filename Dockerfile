@@ -4,9 +4,12 @@ FROM node:22-alpine
 RUN apk add --no-cache git git-daemon rclone \
  && mkdir -p /daten && chown node:node /daten
 WORKDIR /app
-COPY package.json ./
+# paket-manifest.txt + paket-signatur: das beim ZIP-Bau unterschriebene Release (1.15.0), fehlt beim Bau aus dem Repo.
+COPY package.json paket-* ./
 COPY src ./src
 COPY public ./public
+# Für den Fail-over (1.15.0): Der Haupt reicht seinen ganzen Programmstand als unterschriebenes Update-Paket weiter.
+COPY manage.sh docker-compose.yml Dockerfile README.md ./
 ENV NODE_ENV=production PORT=3300 FAHGIT_DATEN=/daten HOME=/daten
 USER node
 EXPOSE 3300

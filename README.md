@@ -79,6 +79,16 @@ Textdateien direkt im Browser bearbeiten – „Bearbeiten“, tippen, speichern
   kurzlebige Nur-Lese-Zugänge. Fällt der Haupt aus: am Ersatz Einstellungen → Fail-over → „Zum Haupt machen“ (später
   „Wieder Ersatz werden“). Meldet der Haupt keine Repos, löscht der Ersatz aus Vorsicht nichts. Kachel „Fail-over“ in der
   Übersicht zeigt, ob der Ersatz aktuell ist.
+- Fail-over-Selbstupdate (1.15.0): Bekommt der Haupt eine neue Version (egal ob per FAH-NAS-Oberfläche oder Skript), zieht
+  der Ersatz von allein nach. `tools/baue_zip.sh` unterschreibt jedes Release beim Bau (Ed25519, privater Schlüssel nur auf
+  dem Bau-Rechner unter `~/.config/fah-git/release-schluessel.pem`; der öffentliche steht in `src/release-schluessel.txt`).
+  Der Haupt reicht nur dieses unterschriebene Release weiter (`paket-manifest.txt`, `paket-signatur` in der ZIP) und kann
+  selbst nichts unterschreiben. Der Ersatz prüft es und legt es bereit; auf seinem Rechner prüft `./manage.sh auto-update`
+  (alle 2 Minuten vom Container `fah-git-updater` gestartet – ohne Netz, nur Docker und dieser App-Ordner; einrichten mit `./manage.sh zeitplan`, `update` macht das auf einem Ersatz selbst) noch einmal mit dem
+  Schlüssel und Prüfcode der installierten Fassung – in Wegwerf-Containern ohne Netz, auf einer Kopie, die der Container nicht
+  erreicht. Nur neuere Versionen; das neue Abbild wird zuerst gebaut, startet die neue Fassung nicht, geht es auf die alte
+  zurück. Abgelehnte Pakete werden nicht erneut versucht (`.update-abgelehnt`). Der Ersatz zeigt sich am Haupt mit seiner
+  Adresse (`ADRESSE=` in seiner `.env`). Geht der Release-Schlüssel verloren, einmal von Hand aktualisieren.
 - Im Browser bearbeiten (1.11.0): In der Dateiansicht einer Textdatei „Bearbeiten“ → Editor-Textfeld (Tab fügt einen
   Tabulator ein, Cmd/Strg+S speichert). Speichern legt einen Commit auf den Zweig; eine zwischenzeitliche Änderung wird
   erkannt und nicht überschrieben. Nur mit Schreibrecht, nicht in nur-lesbaren Kopien.

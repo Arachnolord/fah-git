@@ -109,13 +109,14 @@ export async function failoverKarte(karte) {
     const fehlerListe = (f.repoFehler || []).length ? h('div', { class: 'hinweisbox rot' }, sym('warnung'), h('div', {},
       h('strong', {}, `${f.repoFehler.length} Projekt(e) nicht geholt: `), f.repoFehler.slice(0, 5).map((x) => h('div', { class: 'klein' }, h('code', {}, x.pfad), ` – ${x.fehler}`)))) : null;
     return leeren(karte, kopf, h('div', { class: 'karten-inhalt' },
-      info('Diese Instanz holt alle 15 Sekunden den Stand des Haupts – nur, was sich geändert hat: Projekte samt Zweigen und Tags, Ordner, Konten, Rechte, Einstellungen und Aktivität. Hier lässt sich nichts ändern und nichts pushen. Fällt der Haupt aus, macht „Zum Haupt machen“ diese Instanz voll nutzbar.'),
+      info('Diese Instanz holt alle 15 Sekunden den Stand des Haupts – nur, was sich geändert hat: Projekte samt Zweigen und Tags, Ordner, Konten, Rechte, Einstellungen und Aktivität. Hier lässt sich nichts ändern und nichts pushen. Bekommt der Haupt eine neue Version, holt sie sich das unterschriebene Update selbst (manage.sh spielt es ein). Fällt der Haupt aus, macht „Zum Haupt machen“ diese Instanz voll nutzbar.'),
       h('table', { class: 'tabelle' },
         h('tr', {}, h('th', {}, 'Haupt'), h('td', {}, f.haupt ? h('a', { href: f.haupt, target: '_blank', rel: 'noopener' }, f.haupt) : '–', f.haupt_version ? h('span', { class: 'schwach' }, ` · Version ${f.haupt_version}`) : null)),
         h('tr', {}, h('th', {}, 'Letzter Abgleich'), h('td', { title: datumZeit(f.zuletzt) }, f.zuletzt ? vorZeit(f.zuletzt) : 'noch keiner', ' ',
           f.laeuft ? h('span', { class: 'marker' }, 'läuft') : f.aktuell ? h('span', { class: 'marker gruen' }, 'aktuell') : null)),
         f.gesamt != null ? h('tr', {}, h('th', {}, 'Projekte'), h('td', {}, `${f.fertig ?? 0} von ${f.gesamt} geprüft`)) : null,
-        h('tr', {}, h('th', {}, 'Version hier'), h('td', {}, f.version, ' ', f.haupt_version && f.haupt_version !== f.version ? h('span', { class: 'marker warn' }, 'anders als am Haupt') : null))),
+        h('tr', {}, h('th', {}, 'Version hier'), h('td', {}, f.version, ' ', f.haupt_version && f.haupt_version !== f.version ? h('span', { class: 'marker warn' }, 'anders als am Haupt') : null)),
+        f.update ? h('tr', {}, h('th', {}, 'Update'), h('td', {}, f.update)) : null),
       f.fehler ? h('div', { class: 'hinweisbox rot' }, sym('warnung'), h('div', {}, f.fehler)) : null, fehlerListe,
       h('div', { class: 'zeile' },
         h('button', { class: 'knopf', type: 'button', onclick: async () => { try { await api('POST', '/failover/jetzt'); meldung('Abgleich angestoßen'); setTimeout(neu, 3000); } catch (e) { fehlerMelden(e); } } }, sym('laden'), 'Jetzt abgleichen'),
@@ -145,7 +146,7 @@ export async function failoverKarte(karte) {
         try { await api('POST', '/failover/zurueck', { bestaetigt: true }); neuStartAbwarten('Wird wieder Ersatz – startet neu …'); } catch (e) { fehlerMelden(e); }
       } }, 'Wieder Ersatz werden')))));
   }
-  teile.push(info('Eine zweite FAH-Git-Instanz (z. B. auf dem NAS) hält sich laufend auf diesem Stand: Sie fragt alle 15 Sekunden nach und holt nur Geändertes – Projekte samt Zweigen und Tags, Ordner, Konten, Rechte und Einstellungen. Selbst nimmt sie nichts an (nur lesen), leitet nichts weiter und sichert nicht. Fällt dieser Rechner aus, macht dort ein Klick sie zum Haupt. Der Kopplungscode verlässt nie den Rechner: Jede Anfrage ist damit unterschrieben, jede Antwort verschlüsselt.'));
+  teile.push(info('Eine zweite FAH-Git-Instanz (z. B. auf dem NAS) hält sich laufend auf diesem Stand: Sie fragt alle 15 Sekunden nach und holt nur Geändertes – Projekte samt Zweigen und Tags, Ordner, Konten, Rechte und Einstellungen. Selbst nimmt sie nichts an (nur lesen), leitet nichts weiter und sichert nicht. Neue Versionen übernimmt sie von hier selbst (unterschriebenes Update-Paket). Fällt dieser Rechner aus, macht dort ein Klick sie zum Haupt. Der Kopplungscode verlässt nie den Rechner: Jede Anfrage ist damit unterschrieben, jede Antwort verschlüsselt.'));
   const codeZeigen = (r) => dialog('Kopplungscode', h('div', {},
     h('p', {}, 'Am Ersatz eintragen – auf seiner Startseite oder unter Einstellungen → Fail-over → „Kopplung ändern“. Der Code wird nur jetzt angezeigt.'),
     h('div', { class: 'zeile' }, h('input', { type: 'text', readonly: true, value: r.code, class: 'mono', style: 'flex:1;min-width:0', onfocus: (e) => e.target.select() }),
@@ -167,7 +168,9 @@ export async function failoverKarte(karte) {
       h('tr', {}, h('th', {}, 'Kopplungscode'), h('td', {}, h('code', {}, `${f.anfang}…`), h('span', { class: 'schwach' }, ` seit ${datumZeit(f.erstellt)}`))),
       h('tr', {}, h('th', {}, 'Ersatz'), h('td', {}, e ? [e.adresse ? h('a', { href: e.adresse, target: '_blank', rel: 'noopener' }, e.adresse) : (e.quelle || '?'), ' '] : null, zustandEl)),
       e ? h('tr', {}, h('th', {}, 'Zuletzt gemeldet'), h('td', { title: datumZeit(e.zeit) }, vorZeit(e.zeit), e.zuletzt ? h('span', { class: 'schwach' }, ` · letzter vollständiger Abgleich ${vorZeit(e.zuletzt)}`) : null)) : null,
-      e ? h('tr', {}, h('th', {}, 'Version'), h('td', {}, e.version || '?', ' ', e.version && e.version !== f.version ? h('span', { class: 'marker warn' }, `Haupt hat ${f.version} – Ersatz aktualisieren`) : null)) : null),
+      e ? h('tr', {}, h('th', {}, 'Version'), h('td', {}, e.version || '?', ' ', e.version && e.version !== f.version
+        ? h('span', { class: 'marker warn' }, e.update ? 'aktualisiert sich selbst' : `Haupt hat ${f.version}`) : null)) : null,
+      e && e.update ? h('tr', {}, h('th', {}, 'Update'), h('td', {}, e.update)) : null),
     e && e.fehler ? h('div', { class: 'hinweisbox rot' }, sym('warnung'), h('div', {}, `Der Ersatz meldet: ${e.fehler}`)) : null,
     h('div', { class: 'zeile' },
       h('button', { class: 'knopf', type: 'button', onclick: () => erzeugen(true) }, 'Neuen Code erzeugen'),

