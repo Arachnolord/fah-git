@@ -53,6 +53,17 @@ Textdateien direkt im Browser bearbeiten – „Bearbeiten“, tippen, speichern
   Seit 1.7.0 zeigt die Seite je Schritt (Packen, Kopie aufs NAS) einen Balken mit Restzeit, auch nach neuem Seitenaufruf;
   die Kachel in der Übersicht nennt die Prozent. Halbfertige Archive heißen `.…teil` und zählen nie als Sicherung.
   Totalschaden 1:1 zurückholen. Für off-box-Schutz den Datenordner zusätzlich in FAH-Sicherung aufnehmen.
+- Releases (1.12.0): FAH-Git bindet einen Ordner mit fertigen Release-Dateien (ZIP, ISO, DMG, PDF …) **nur lesend** ein –
+  in der `.env` `ABLAGE=<Ordner auf dem NAS>`, im Container `/ablage`. Reiter „Releases“ je Projekt: Admins ordnen Dateien
+  aus der Ablage zu (Ordner durchklicken, ankreuzen) und wählen eine ZIP als „öffentlich“; alle mit Leserecht sehen Name,
+  Größe und Stand und können herunterladen (ohne Pfade der Ablage). „Auf GitHub veröffentlichen“ schickt die öffentliche
+  ZIP ohne Hochladen als Release zu GitHub (Version = Datum/Uhrzeit der Datei, z. B. `2026.11.27-0928`; ältere Releases
+  und Tags werden danach entfernt).
+  Schutz: Namen nach Schlüssel/Privatem („NICHT VERTEILEN“, „privat“, „Nur für …“, „API KEYS“, `.hex`, `.pem` …) sind
+  gesperrt; keine Verweise/harten Links, Pfade bleiben in der Ablage. ZIPs werden über Inhaltsverzeichnis UND Dateiköpfe
+  lückenlos gelesen; ZIPs mit Schlüssel- oder Zugangsdateien bzw. `.git`-Ordner lassen sich gar nicht zuordnen. Vor dem
+  Veröffentlichen sperren zusätzlich verschachtelte Archive und je Projekt verbotene Pfade (z. B. `lokale-stimme/`).
+  Öffentlich kann nur eine ZIP sein – nur deren Inhalt ist prüfbar. Geprüft und hochgeladen wird aus demselben Dateigriff.
 - Im Browser bearbeiten (1.11.0): In der Dateiansicht einer Textdatei „Bearbeiten“ → Editor-Textfeld (Tab fügt einen
   Tabulator ein, Cmd/Strg+S speichert). Speichern legt einen Commit auf den Zweig; eine zwischenzeitliche Änderung wird
   erkannt und nicht überschrieben. Nur mit Schreibrecht, nicht in nur-lesbaren Kopien.

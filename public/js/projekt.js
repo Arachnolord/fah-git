@@ -21,7 +21,7 @@ export async function projektSeite(r, ctx) {
   const ansicht = r.ansicht;
   const admin = !!ctx.zustand.ich.admin;
   const schreiben = darfSchreiben(p.pfad);
-  const reiterAktiv = { dateien: 'dateien', datei: 'dateien', verlauf: 'verlauf', commit: 'verlauf', zweige: 'zweige', spiegel: 'spiegel', einstellungen: 'einstellungen', aktivitaet: 'aktivitaet' }[ansicht] || 'dateien';
+  const reiterAktiv = { dateien: 'dateien', datei: 'dateien', verlauf: 'verlauf', commit: 'verlauf', zweige: 'zweige', spiegel: 'spiegel', releases: 'releases', einstellungen: 'einstellungen', aktivitaet: 'aktivitaet' }[ansicht] || 'dateien';
   let inhaltEl;
   if (p.leer && ['dateien', 'datei', 'verlauf', 'commit'].includes(ansicht)) inhaltEl = leerAnleitung(p);
   else if (ansicht === 'dateien') inhaltEl = await dateienAnsicht(p, ref, r.params.ordner || '');
@@ -30,6 +30,7 @@ export async function projektSeite(r, ctx) {
   else if (ansicht === 'commit') inhaltEl = await commitAnsicht(p, r.params.sha);
   else if (ansicht === 'zweige') inhaltEl = zweigeAnsicht(p);
   else if (ansicht === 'spiegel') inhaltEl = spiegelAnsicht(p, admin);
+  else if (ansicht === 'releases') inhaltEl = releasesAnsicht(p, admin);
   else if (ansicht === 'aktivitaet') inhaltEl = h('div', { class: 'karte' }, aktivitaetListe(await api('GET', `/aktivitaet?${q({ projekt: p.pfad, anzahl: 100 })}`)));
   else if (ansicht === 'einstellungen') inhaltEl = schreiben ? einstellungenAnsicht(p, ctx) : h('div', { class: 'leer-hinweis' }, 'Die Einstellungen ändern nur Benutzer mit Schreibrecht.');
   else inhaltEl = h('div', { class: 'leer-hinweis' }, 'Unbekannte Ansicht');
@@ -52,7 +53,8 @@ export async function projektSeite(r, ctx) {
         nasKnopf(p, ref, ctx.zustand.fahnas))),
     h('nav', { class: 'reiter' },
       reiter('dateien', 'Dateien', 'datei'), reiter('verlauf', 'Verlauf', 'commit'), reiter('zweige', 'Zweige', 'zweig', p.zweige.length),
-      reiter('spiegel', 'Spiegel', 'spiegel', p.spiegel.length + (p.quelle ? 1 : 0) || null), reiter('aktivitaet', 'Aktivität', 'uhr'), schreiben ? reiter('einstellungen', 'Einstellungen', 'einstellungen') : null),
+      reiter('spiegel', 'Spiegel', 'spiegel', p.spiegel.length + (p.quelle ? 1 : 0) || null),
+      p.releases.dateien.length || admin ? reiter('releases', 'Releases', 'laden', p.releases.dateien.length || null) : null, reiter('aktivitaet', 'Aktivität', 'uhr'), schreiben ? reiter('einstellungen', 'Einstellungen', 'einstellungen') : null),
     inhaltEl);
 }
 
@@ -477,6 +479,113 @@ async function githubAendern(p, s) {
   if (r) { meldung('Gespeichert'); location.reload(); }
 }
 
+// --- Releases (1.12.0) ---------------------------------------------------------------------------------------------
+// Fertige Dateien aus der Release-Ablage des NAS (nur lesend eingebunden). Je Projekt zugeordnet; eine davon ist
+// „öffentlich“ und geht per Knopf als GitHub-Release raus – ohne erneutes Hochladen.
+const releaseSpiegel = (p) => p.spiegel.filter((s) => s.art === 'github' && oeffentlichMod(s) && s.zuletzt && s.zuletzt.ergebnis === 'ok');
+
+function releasesAnsicht(p, admin) {
+  const r = p.releases;
+  const ziele = releaseSpiegel(p);
+  const zeile = (d) => h('tr', {},
+    h('td', { style: 'overflow-wrap:anywhere' }, h('div', {}, h('strong', {}, d.name),
+      d.oeffentlich ? h('span', { class: 'marker gruen', style: 'margin-left:8px' }, sym('schild'), 'öffentlich') : null,
+      d.gesperrt ? h('span', { class: 'marker rot', style: 'margin-left:8px', title: d.gesperrt }, sym('schloss'), 'gesperrt') : null,
+      d.fehlt ? h('span', { class: 'marker warn', style: 'margin-left:8px' }, sym('warnung'), 'nicht mehr in der Ablage') : null),
+      d.rel ? h('div', { class: 'schwach klein mono' }, d.rel) : null),
+    h('td', { class: 'schwach', style: 'white-space:nowrap' }, d.groesse != null ? groesse(d.groesse) : '–'),
+    h('td', { class: 'schwach', style: 'white-space:nowrap' }, d.zeit ? datumZeit(d.zeit) : '–'),
+    h('td', { style: 'text-align:right' }, !d.gesperrt && !d.fehlt
+      ? h('a', { class: 'knopf klein', href: `/api/release-datei?${q({ pfad: p.pfad, nr: String(d.nr) })}`, download: d.name }, sym('laden'), 'Herunterladen') : null));
+  return h('div', {},
+    h('div', { class: 'karte abschnitt' },
+      h('div', { class: 'karten-kopf' }, h('h2', {}, 'Releases'),
+        admin ? h('div', { class: 'zeile ende' },
+          r.oeffentlich && ziele.length ? ziele.map((s) => h('button', { class: 'knopf haupt klein', type: 'button', onclick: () => releaseAusAblage(p, s) }, sym('schild'), ziele.length > 1 ? `Auf GitHub ${s.repo} veröffentlichen …` : 'Auf GitHub veröffentlichen …')) : null,
+          h('button', { class: 'knopf klein', type: 'button', onclick: () => releasesZuordnen(p) }, sym('bearbeiten'), 'Dateien zuordnen …')) : null),
+      h('div', { class: 'karten-inhalt' },
+        info('Fertige Dateien (ZIP, ISO, PDF …) aus der Release-Ablage auf dem NAS – FAH-Git liest sie nur und lädt nichts hoch. Die als „öffentlich“ gewählte Datei geht mit einem Klick als Release zu GitHub; dort bleibt nur das neueste.'),
+        !r.ablage ? h('div', { class: 'hinweisbox warn', style: 'margin-top:8px' }, sym('warnung'), h('div', {}, 'Die Release-Ablage ist nicht eingebunden (in der .env von FAH-Git: ABLAGE=<Ordner auf dem NAS>).')) : null,
+        r.verboten.length ? h('p', { class: 'klein' }, 'Darf nicht in der öffentlichen Datei stecken: ', r.verboten.map((v) => h('code', { style: 'margin-right:6px' }, v))) : null,
+        admin && r.oeffentlich && !ziele.length ? h('p', { class: 'klein schwach' }, 'Zum Veröffentlichen braucht das Projekt eine GitHub-Weiterleitung „Öffentlicher Stand“, die schon einmal sauber übertragen hat (Reiter Spiegel).') : null),
+      r.dateien.length ? h('table', { class: 'tabelle' }, h('tr', {}, h('th', {}, 'Datei'), h('th', {}, 'Größe'), h('th', {}, 'Stand'), h('th', {})), r.dateien.map(zeile))
+        : h('div', { class: 'leer-hinweis' }, admin ? 'Noch keine Dateien zugeordnet – „Dateien zuordnen …“ wählt sie aus der Ablage.' : 'Keine Release-Dateien.')));
+}
+
+/** Dateien aus der Ablage zuordnen: Ordner durchklicken, ankreuzen, eine davon „öffentlich“. */
+async function releasesZuordnen(p) {
+  const gewaehlt = new Map(p.releases.dateien.map((d) => [d.rel, d]));
+  let oeffentlich = p.releases.oeffentlich;
+  let ordner = p.releases.dateien.length ? p.releases.dateien[0].rel.split('/').slice(0, -1).join('/') : '';
+  const verboten = h('textarea', { rows: 2, placeholder: 'z. B. lokale-stimme/' }, p.releases.verboten.join('\n'));
+  const liste = h('div', { class: 'ablage-liste', style: 'max-height:300px;overflow:auto;border:1px solid var(--rand);border-radius:8px;padding:6px' });
+  const auswahl = h('div', {});
+  const pfadZeile = h('div', { class: 'klein', style: 'margin:6px 0' });
+  function auswahlZeichnen() {
+    leeren(auswahl);
+    if (!gewaehlt.size) { auswahl.appendChild(h('div', { class: 'schwach klein' }, 'Noch nichts angekreuzt.')); return; }
+    if (oeffentlich && !gewaehlt.has(oeffentlich)) oeffentlich = null;
+    auswahl.appendChild(h('div', { class: 'klein schwach', style: 'margin-bottom:4px' }, 'Zugeordnet – welche ZIP ist für GitHub (öffentlich)? Nur ZIPs lassen sich vorher prüfen.'));
+    for (const d of [{ rel: '', name: 'keine (nichts öffentlich)' }, ...gewaehlt.values()]) {
+      const zip = !d.rel || /\.(zip|apk|jar)$/i.test(d.rel);
+      const radio = h('input', { type: 'radio', name: 'oeffentlich', disabled: !zip, checked: (oeffentlich || '') === d.rel, onchange: () => { oeffentlich = d.rel || null; } });
+      auswahl.appendChild(h('label', { style: `display:flex;gap:8px;align-items:center;margin:3px 0;${zip ? '' : 'opacity:.6'}` }, radio, h('span', {}, d.name),
+        d.rel ? h('span', { class: 'schwach klein mono' }, d.rel) : null, zip ? null : h('span', { class: 'schwach klein' }, '(nur zum Herunterladen)')));
+    }
+  }
+  async function laden() {
+    leeren(liste); liste.appendChild(h('div', { class: 'schwach klein' }, 'Lade …'));
+    let d;
+    try { d = await api('GET', `/ablage?${q({ ordner })}`); } catch (e) { leeren(liste); liste.appendChild(h('div', { class: 'hinweisbox warn' }, sym('warnung'), h('div', {}, e.message))); return; }
+    leeren(liste); leeren(pfadZeile);
+    const teile = d.ordner ? d.ordner.split('/') : [];
+    pfadZeile.appendChild(h('a', { href: '#', onclick: (e) => { e.preventDefault(); ordner = ''; laden(); } }, 'Ablage'));
+    teile.forEach((t, i) => { pfadZeile.appendChild(document.createTextNode(' / ')); pfadZeile.appendChild(h('a', { href: '#', onclick: (e) => { e.preventDefault(); ordner = teile.slice(0, i + 1).join('/'); laden(); } }, t)); });
+    if (!d.eintraege.length) liste.appendChild(h('div', { class: 'schwach klein' }, 'Leer – keine Release-Dateien in diesem Ordner.'));
+    for (const e of d.eintraege) {
+      if (e.ordner) { liste.appendChild(h('div', { style: 'padding:3px 2px' }, h('a', { href: '#', onclick: (ev) => { ev.preventDefault(); ordner = e.rel; laden(); } }, sym('ordner'), ` ${e.name}`))); continue; }
+      const box = h('input', { type: 'checkbox', checked: gewaehlt.has(e.rel), disabled: !!e.gesperrt, onchange: () => { if (box.checked) gewaehlt.set(e.rel, e); else gewaehlt.delete(e.rel); auswahlZeichnen(); } });
+      liste.appendChild(h('label', { style: `display:flex;gap:8px;align-items:center;padding:3px 2px;${e.gesperrt ? 'opacity:.55' : ''}`, title: e.gesperrt || '' },
+        box, sym(e.gesperrt ? 'schloss' : 'datei'), h('span', {}, e.name), h('span', { class: 'schwach klein' }, `${groesse(e.groesse)} · ${datumZeit(e.zeit)}`),
+        e.gesperrt ? h('span', { class: 'klein', style: 'color:var(--gefahr)' }, e.gesperrt) : null));
+    }
+  }
+  auswahlZeichnen(); laden();
+  const r = await dialog(`Release-Dateien für ${p.name}`, h('div', {},
+    info('Nur lesend: FAH-Git verändert die Ablage nie. Dateien mit Namen nach Schlüssel/Privatem (z. B. „NICHT VERTEILEN“) sind gesperrt.'),
+    pfadZeile, liste, h('div', { style: 'margin-top:10px' }, auswahl),
+    feld('Darf nicht in der öffentlichen Datei stecken', verboten, 'Je Zeile ein Teilpfad. Vor dem Veröffentlichen liest FAH-Git das Inhaltsverzeichnis der ZIP – steckt so etwas darin (oder Schlüssel), gibt es kein Release.')),
+  [{ text: 'Abbrechen' }, { text: 'Speichern', art: 'haupt', aktion: () => api('PUT', '/releases', { pfad: p.pfad, dateien: [...gewaehlt.keys()], oeffentlich,
+    verboten: verboten.value.split('\n').map((x) => x.trim()).filter(Boolean) }) }]);
+  if (r) { meldung('Releases gespeichert'); location.reload(); }
+}
+
+/** Die als „öffentlich“ gewählte Datei als GitHub-Release veröffentlichen (ohne Hochladen). */
+async function releaseAusAblage(p, s) {
+  const d = p.releases.dateien.find((x) => x.oeffentlich);
+  if (!d) { fehlerMelden(new Error('Keine öffentliche Datei gewählt')); return; }
+  const version = h('input', { type: 'text', autocomplete: 'off', placeholder: 'leer = Stand der Datei, z. B. 2026.11.27-0928' });
+  const titel = h('input', { type: 'text', placeholder: `${p.name} – Version …` });
+  const text = h('textarea', { rows: 3, placeholder: 'Was ist neu? (optional)' });
+  const r = await dialog(`Release für GitHub ${s.repo}`, h('div', {},
+    h('p', { style: 'margin-top:0' }, 'Datei: ', h('strong', {}, d.name), h('span', { class: 'schwach' }, ` · ${d.groesse != null ? groesse(d.groesse) : '?'} · Stand ${d.zeit ? datumZeit(d.zeit) : '?'}`)),
+    h('div', { class: 'hinweisbox warn' }, sym('warnung'), h('div', {}, 'Die Datei geht so, wie sie ist, öffentlich nach GitHub. FAH-Git prüft vorher das Inhaltsverzeichnis der ZIP auf Schlüssel und auf die für dieses Projekt verbotenen Pfade.')),
+    feld('Version', version, 'Wird als Tag auf GitHub angelegt. Leer = Datum und Uhrzeit der Datei. Jede Version nur einmal.'),
+    feld('Titel', titel, 'Leer = die Version.'),
+    feld('Beschreibung', text, 'Steht auf der Release-Seite (optional).'),
+    info('Danach bleibt auf GitHub nur dieses neueste Release: ältere Releases und ihre Tags löscht FAH-Git nach dem Hochladen.')),
+  [{ text: 'Abbrechen' }, { text: 'Veröffentlichen', art: 'haupt', aktion: async () => {
+    meldung(`${d.name} geht zu GitHub …`);
+    return api('POST', '/github/release-ablage', { pfad: p.pfad, id: s.id, version: version.value.trim(), titel: titel.value.trim(), text: text.value.trim() });
+  } }]);
+  if (r) {
+    const e = r.entfernt || {};
+    if ((e.fehler || []).length) { fehlerMelden(new Error(`Release angelegt – Altes auf GitHub nicht ganz entfernt: ${e.fehler.join('; ')}`)); return; }
+    meldung((e.releases || []).length || (e.tags || []).length ? `Veröffentlicht · ${(e.releases || []).length} ältere(s) Release(s) und ${(e.tags || []).length} Tag(s) entfernt` : 'Veröffentlicht');
+    setTimeout(() => location.reload(), 1500);
+  }
+}
+
 function spiegelAnsicht(p, admin) {
   if (!admin) return nurAnsehen(p);
   const neuWeiter = async () => {
@@ -536,6 +645,8 @@ function spiegelAnsicht(p, admin) {
             s.art === 'github' && oeffentlichMod(s) && s.veroeffentlichbar && s.sichtbarkeit !== 'oeffentlich' && s.zuletzt && s.zuletzt.ergebnis === 'ok'
               ? h('button', { class: 'knopf klein', type: 'button', onclick: () => sichtbarkeitAendern(p, s, true) }, 'Öffentlich stellen …') : null,
             s.art === 'github' && s.sichtbarkeit === 'oeffentlich' ? h('button', { class: 'knopf klein', type: 'button', onclick: () => sichtbarkeitAendern(p, s, false) }, 'Wieder privat') : null,
+            s.art === 'github' && oeffentlichMod(s) && s.zuletzt && s.zuletzt.ergebnis === 'ok' && p.releases.oeffentlich
+              ? h('button', { class: 'knopf klein haupt', type: 'button', onclick: () => releaseAusAblage(p, s) }, 'Öffentliches Release veröffentlichen …') : null,
             s.art === 'github' && oeffentlichMod(s) && s.zuletzt && s.zuletzt.ergebnis === 'ok' ? h('button', { class: 'knopf klein', type: 'button', onclick: () => releaseHochladen(p, s) }, 'Release hochladen …') : null,
             s.art !== 'github' ? h('button', { class: 'knopf klein', type: 'button', onclick: async () => { await api('PATCH', '/spiegel', { pfad: p.pfad, id: s.id, aktiv: !s.aktiv }); location.reload(); } }, s.aktiv ? 'Pausieren' : 'Fortsetzen') : null,
             s.art !== 'github' ? h('button', { class: 'knopf klein', type: 'button', onclick: async () => {

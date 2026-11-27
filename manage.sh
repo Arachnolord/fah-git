@@ -30,7 +30,7 @@ env_anlegen() {
   local port
   port="$(erster_freier_port 3300)"
   umask 077
-  printf '# Von manage.sh angelegt. Wird bei Updates nie überschrieben.\nPORT=%s\nADRESSE=\n' "$port" >.env
+  printf '# Von manage.sh angelegt. Wird bei Updates nie überschrieben.\nPORT=%s\nADRESSE=\n# Release-Ablage (nur lesend), z. B. ein Ordner der NAS-Freigabe mit fertigen ZIPs\nABLAGE=\n' "$port" >.env
   info "Erste Einrichtung: .env angelegt (Port $port)."
 }
 

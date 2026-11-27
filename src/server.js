@@ -28,6 +28,8 @@ import * as repo from './repo.js';
 import { gitText, GIT_UMGEBUNG } from './git.js';
 import { recht, baumFiltern, LESEN, SCHREIBEN } from './rechte.js';
 import { BILD_MAX, artAusTyp, bildArt } from './profilbild.js';
+import { Ablage, versionAusZeit, downloadKopf, PRUEFBAR } from './ablage.js';
+import { pipeline } from 'node:stream';
 
 const HIER = path.dirname(fileURLToPath(import.meta.url));
 const OEFFENTLICH = path.join(HIER, '..', 'public');
@@ -111,13 +113,15 @@ async function httpBackendDa() {
   return backendDa;
 }
 
-export function erstelleServer({ daten, oeffentlicheAdresse = '', github: githubOptionen = {} }) {
+export function erstelleServer({ daten, oeffentlicheAdresse = '', github: githubOptionen = {}, ablage: ablageOrdner = process.env.FAHGIT_ABLAGE || '/ablage' }) {
   const speicher = new Speicher(daten);
   const baum = new Baum(speicher);
   const konten = new Konten(speicher);
   const aktivitaet = new Aktivitaet(speicher);
   const einstellungen = async () => ({ adresse: oeffentlicheAdresse, ziel_regeln: [], fahnas_adresse: '', sicherung: { auto: true, behalten: 14 }, ...(await speicher.lesen('einstellungen.json', {})) });
   const gh = new GitHub(githubOptionen);
+  // Release-Ablage (1.12.0): fertige ZIPs/ISOs aus dem NAS-Ordner, nur lesend; je Projekt zugeordnet, eine davon „öffentlich“.
+  const ablage = new Ablage(ablageOrdner);
   // GitHub-Zugang (1.8.0): EIN Token für alle GitHub-Spiegel, verschlüsselt mit geheim.key, nie ausgeliefert.
   const githubZugang = async () => { const g = (await einstellungen()).github; return g && g.geheim ? { benutzer: g.konto, name: g.name || g.konto, geheim: g.geheim, web: gh.web } : null; };
   // Bereinigung für den öffentlichen Stand (1.9.0): eigener Schlüssel, damit „GitHub trennen“ die Regeln nicht löscht.
@@ -214,7 +218,51 @@ export function erstelleServer({ daten, oeffentlicheAdresse = '', github: github
       }),
       quelle: meta.quelle ? { url: meta.quelle.url, ...(ich.admin ? { benutzer: meta.quelle.benutzer, hat_geheim: !!meta.quelle.geheim } : {}),
         takt: meta.quelle.takt, zuletzt: meta.quelle.zuletzt } : null,
+      releases: await releasesDaten(meta, ich),
     };
+  }
+
+  /**
+   * Zugeordnete Release-Dateien des Projekts mit Größe/Stand (fehlt = nicht mehr in der Ablage). Nicht-Admins sehen keine
+   * Pfade der Ablage und keine Sperrliste – nur Namen und die Nummer zum Herunterladen.
+   */
+  async function releasesDaten(meta, ich) {
+    const r = meta.releases || {};
+    const dateien = await Promise.all((r.dateien || []).map(async (d, nr) => {
+      const i = await ablage.info(d).catch(() => ({ rel: d, name: path.posix.basename(d), fehlt: true }));
+      return { nr, ...i, oeffentlich: r.oeffentlich === d, ...(ich.admin ? {} : { rel: undefined }) };
+    }));
+    return { ablage: await ablage.da(), dateien, oeffentlich: ich.admin ? r.oeffentlich || null : !!r.oeffentlich, verboten: ich.admin ? r.verboten || [] : [] };
+  }
+
+  /**
+   * Release auf GitHub anlegen, Datei als Strom anhängen, danach ältere Releases + Tags entfernen (nur das neueste bleibt,
+   * Betreiber 23.11.2026). Gemeinsam für „Release hochladen“ (Datei aus dem Browser) und „aus der Ablage“ (1.12.0).
+   */
+  async function releaseVeroeffentlichen(pfad, s, { tag, titel, text, datei, strom, groesse, ich, quelle }) {
+    const token = await githubToken();
+    const zweig = Array.isArray(s.zweige) && s.zweige.length ? s.zweige[0] : await baum.standardZweig(pfad);
+    const rel = await gh.releaseAnlegen(token, s.repo, { tag, name: String(titel || '').slice(0, 200) || tag, text: String(text || '').slice(0, 5000), zweig });
+    const d = await gh.releaseDatei(token, rel.upload, datei, strom, groesse, /\.zip$/i.test(datei) ? 'application/zip' : 'application/octet-stream');
+    let entfernt = { releases: [], tags: [], fehler: [] };
+    try { entfernt = await gh.aeltereReleasesEntfernen(token, s.repo, tag); } catch (e) { entfernt.fehler.push(e.message); }
+    await baum.projektAendern(pfad, (p) => {
+      const x = (p.spiegel || []).find((y) => y.id === s.id);
+      if (x) x.releases = [{ tag, datei, url: rel.url, zeit: new Date().toISOString(), ...(quelle ? { quelle } : {}) }];
+    });
+    const weg = entfernt.releases.length + entfernt.tags.length ? ` · entfernt: ${entfernt.releases.length} alte(s) Release(s), ${entfernt.tags.length} Tag(s)` : '';
+    aktivitaet.melden({ art: 'spiegel', projekt: pfad, nutzer: ich.name, anzeige: ich.anzeige, ergebnis: entfernt.fehler.length ? 'teilweise' : 'ok',
+      text: `GitHub ${s.repo}: Release ${tag} mit ${datei}${quelle ? ' (aus der Ablage)' : ''}${weg}${entfernt.fehler.length ? ` · nicht entfernt: ${entfernt.fehler.join('; ')}` : ''}` });
+    return { url: rel.url, datei: d.url, entfernt };
+  }
+
+  /** GitHub-Spiegel für Releases: nur „Öffentlicher Stand“, schon einmal sauber übertragen. */
+  async function releaseSpiegel(pfad, id) {
+    const s = ((await baum.projektMeta(pfad)).spiegel || []).find((x) => x.id === id && x.art === 'github');
+    if (!s) throw new HttpFehler(404, 'Spiegel fehlt');
+    if (s.modus !== 'oeffentlich') throw new HttpFehler(400, 'Releases nur bei „Öffentlicher Stand (bereinigt)“');
+    if (!(s.zuletzt && s.zuletzt.ergebnis === 'ok')) throw new HttpFehler(400, 'Erst einmal sauber übertragen („Jetzt zu GitHub“) – das Release braucht einen Stand auf GitHub');
+    return s;
   }
 
   function auftragStarten(art, arbeit) {
@@ -539,6 +587,46 @@ export function erstelleServer({ daten, oeffentlicheAdresse = '', github: github
     }
 
     // Weiterleitungen und Quellen: nur Administratoren (die Zugänge darin sieht sonst niemand).
+    // Release-Ablage (1.12.0): Ordner durchsehen + zuordnen nur Admins; Herunterladen mit Leserecht aufs Projekt.
+    if (weg === '/ablage' && m === 'GET') { nurAdmin(); return json(res, 200, { da: await ablage.da(), ...(await ablage.liste(q.ordner || '')) }); }
+    if (weg === '/releases' && m === 'PUT') {
+      nurAdmin();
+      const b = await koerper(req); const pfad = await projektPfad(b.pfad);
+      if (!Array.isArray(b.dateien) || b.dateien.length > 50) throw new HttpFehler(400, 'Dateien als Liste (höchstens 50)');
+      const dateien = [];
+      for (const d of b.dateien) {
+        const rel = ablage.rel(d);
+        const grund = ablage.gesperrt(rel);
+        if (grund) throw new HttpFehler(400, `${rel}: ${grund}`);
+        // muss da sein, eine echte Datei der Ablage; ZIPs mit Schlüsseln/Zugangsdaten nie zuordnen (alle mit Leserecht laden sie)
+        const f = await ablage.oeffnen(rel);
+        try {
+          if (PRUEFBAR.test(f.name)) { const funde = await ablage.schluesselFunde(f.fh); if (funde.length) throw new HttpFehler(400, `${rel} enthält ${funde.join(' · ')}`); }
+        } finally { await f.fh.close().catch(() => {}); }
+        if (!dateien.includes(rel)) dateien.push(rel);
+      }
+      const oeffentlich = b.oeffentlich ? ablage.rel(b.oeffentlich) : null;
+      if (oeffentlich && !dateien.includes(oeffentlich)) throw new HttpFehler(400, 'Die öffentliche Datei muss zugeordnet sein');
+      if (oeffentlich && !PRUEFBAR.test(oeffentlich)) throw new HttpFehler(400, 'Öffentlich kann nur eine ZIP sein – nur deren Inhalt lässt sich vorher prüfen');
+      if (!Array.isArray(b.verboten || []) || (b.verboten || []).length > 20) throw new HttpFehler(400, 'Verboten: Liste mit höchstens 20 Einträgen');
+      const verboten = (b.verboten || []).map((v) => String(v).trim().slice(0, 100)).filter(Boolean);
+      await baum.projektAendern(pfad, (p) => { p.releases = { dateien, oeffentlich, verboten }; });
+      aktivitaet.melden({ art: 'projekt', projekt: pfad, nutzer: ich.name, anzeige: ich.anzeige,
+        text: `Releases: ${dateien.length} Datei(en) zugeordnet${oeffentlich ? `, öffentlich: ${path.posix.basename(oeffentlich)}` : ', keine öffentlich'}` });
+      return json(res, 200, await releasesDaten({ releases: { dateien, oeffentlich, verboten } }, ich));
+    }
+    if (weg === '/release-datei' && m === 'GET') {
+      // Herunterladen per Nummer der Zuordnung (Leser kennen keine Pfade der Ablage)
+      const pfad = await lesbar(q.pfad);
+      const r = (await baum.projektMeta(pfad)).releases || {};
+      const nr = Number(q.nr);
+      const rel = Number.isInteger(nr) && nr >= 0 ? (r.dateien || [])[nr] : undefined;
+      if (!rel) throw new HttpFehler(404, 'Diese Datei gehört nicht zum Projekt');
+      const f = await ablage.oeffnen(rel);
+      res.writeHead(200, downloadKopf(f.name, f.groesse));
+      // pipeline schließt Datei und Antwort auch bei Abbruch (sonst bleiben Griffe offen)
+      return pipeline(f.fh.createReadStream({ start: 0, end: Math.max(0, f.groesse - 1), autoClose: true }), res, () => { f.fh.close().catch(() => {}); });
+    }
     if ((weg === '/spiegel' || weg.startsWith('/spiegel/') || weg === '/quelle' || weg.startsWith('/quelle/')) && m !== 'GET') nurAdmin();
     if (weg === '/spiegel' && m === 'POST') {
       const b = await koerper(req); const pfad = await projektPfad(b.pfad);
@@ -718,10 +806,7 @@ export function erstelleServer({ daten, oeffentlicheAdresse = '', github: github
     if (weg === '/github/release' && m === 'PUT') {
       // Fertige Datei (z. B. Mac-App als ZIP) als GitHub-Release – Rohdaten im Körper, Angaben in der Adresse.
       const pfad = await projektPfad(q.pfad);
-      const s = ((await baum.projektMeta(pfad)).spiegel || []).find((x) => x.id === q.id && x.art === 'github');
-      if (!s) throw new HttpFehler(404, 'Spiegel fehlt');
-      if (s.modus !== 'oeffentlich') throw new HttpFehler(400, 'Releases nur bei „Öffentlicher Stand (bereinigt)“');
-      if (!(s.zuletzt && s.zuletzt.ergebnis === 'ok')) throw new HttpFehler(400, 'Erst einmal sauber übertragen („Jetzt zu GitHub“) – das Release braucht einen Stand auf GitHub');
+      const s = await releaseSpiegel(pfad, q.id);
       const tag = String(q.version || '').trim();
       if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,60}$/.test(tag)) throw new HttpFehler(400, 'Version: Buchstaben, Ziffern, Punkt, Minus (z. B. 2026.11.20 oder v1.2.0)');
       const datei = String(q.datei || '').trim();
@@ -729,21 +814,26 @@ export function erstelleServer({ daten, oeffentlicheAdresse = '', github: github
       const groesse = Number(req.headers['content-length']);
       if (!Number.isFinite(groesse) || groesse <= 0) throw new HttpFehler(411, 'Größe der Datei fehlt');
       if (groesse > 2 * 1024 * 1024 * 1024 - 1) throw new HttpFehler(413, 'GitHub nimmt je Release-Datei höchstens 2 GB');
-      const token = await githubToken();
-      const zweig = Array.isArray(s.zweige) && s.zweige.length ? s.zweige[0] : await baum.standardZweig(pfad);
-      const rel = await gh.releaseAnlegen(token, s.repo, { tag, name: String(q.titel || '').slice(0, 200) || tag, text: String(q.text || '').slice(0, 5000), zweig });
-      const d = await gh.releaseDatei(token, rel.upload, datei, req, groesse, /\.zip$/i.test(datei) ? 'application/zip' : 'application/octet-stream');
-      // Erst NACH erfolgreichem Hochladen: ältere Releases + Tags weg, nur das neueste bleibt (Betreiber 23.11.2026)
-      let entfernt = { releases: [], tags: [], fehler: [] };
-      try { entfernt = await gh.aeltereReleasesEntfernen(token, s.repo, tag); } catch (e) { entfernt.fehler.push(e.message); }
-      await baum.projektAendern(pfad, (p) => {
-        const x = (p.spiegel || []).find((y) => y.id === s.id);
-        if (x) x.releases = [{ tag, datei, url: rel.url, zeit: new Date().toISOString() }];
-      });
-      const weg = entfernt.releases.length + entfernt.tags.length ? ` · entfernt: ${entfernt.releases.length} alte(s) Release(s), ${entfernt.tags.length} Tag(s)` : '';
-      aktivitaet.melden({ art: 'spiegel', projekt: pfad, nutzer: ich.name, anzeige: ich.anzeige, ergebnis: entfernt.fehler.length ? 'teilweise' : 'ok',
-        text: `GitHub ${s.repo}: Release ${tag} mit ${datei}${weg}${entfernt.fehler.length ? ` · nicht entfernt: ${entfernt.fehler.join('; ')}` : ''}` });
-      return json(res, 200, { url: rel.url, datei: d.url, entfernt });
+      return json(res, 200, await releaseVeroeffentlichen(pfad, s, { tag, titel: q.titel, text: q.text, datei, strom: req, groesse, ich }));
+    }
+    if (weg === '/github/release-ablage' && m === 'POST') {
+      // 1.12.0: die als „öffentlich“ gewählte Datei aus der Ablage veröffentlichen – ohne Hochladen. Vorher ZIP-Inhalt prüfen.
+      const b = await koerper(req); const pfad = await projektPfad(b.pfad);
+      const s = await releaseSpiegel(pfad, b.id);
+      const r = (await baum.projektMeta(pfad)).releases || {};
+      if (!r.oeffentlich) throw new HttpFehler(400, 'Noch keine Datei als „öffentlich“ gewählt (Reiter Releases)');
+      // EIN Griff auf die Datei: geprüft und hochgeladen wird genau dasselbe, auch wenn die Ablage sich dazwischen ändert
+      const f = await ablage.oeffnen(r.oeffentlich);
+      let strom = null;
+      try {
+        await ablage.oeffentlichPruefen(f, r.verboten || []);
+        if (f.groesse > 2 * 1024 * 1024 * 1024 - 1) throw new HttpFehler(413, 'GitHub nimmt je Release-Datei höchstens 2 GB');
+        if (!/^[A-Za-z0-9][A-Za-z0-9 ._()-]{0,150}$/.test(f.name)) throw new HttpFehler(400, 'Dateiname: Buchstaben, Ziffern, Leerzeichen, Punkt, Minus, Klammern');
+        const tag = String(b.version || '').trim() || versionAusZeit(f.zeit);
+        if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,60}$/.test(tag)) throw new HttpFehler(400, 'Version: Buchstaben, Ziffern, Punkt, Minus (z. B. 2026.11.20 oder v1.2.0)');
+        strom = f.fh.createReadStream({ start: 0, end: f.groesse - 1, autoClose: false });
+        return json(res, 200, await releaseVeroeffentlichen(pfad, s, { tag, titel: b.titel, text: b.text, datei: f.name, strom, groesse: f.groesse, ich, quelle: r.oeffentlich }));
+      } finally { if (strom) strom.destroy(); await f.fh.close().catch(() => {}); }
     }
     if (weg === '/github/sichtbarkeit' && m === 'POST') {
       // Öffentlich nur für bereinigte Spiegel, die schon sauber übertragen haben; zurück auf privat geht immer.

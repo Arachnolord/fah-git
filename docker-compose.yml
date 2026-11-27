@@ -12,6 +12,9 @@ services:
       FAHGIT_ADRESSE: ${ADRESSE:-}
     volumes:
       - ./daten:/daten
+      # Release-Ablage (1.12.0): Ordner mit fertigen ZIPs/ISOs, NUR LESEND. In der .env: ABLAGE=<Ordner auf dem NAS>.
+      # Ohne Eintrag ein leerer Ordner im App-Ordner – der Reiter „Releases“ meldet dann „nicht eingebunden“.
+      - ${ABLAGE:-./ablage}:/ablage:ro
     # Sparsam: Git-Server für eine Handvoll Nutzer. Adblock und Proxy auf demselben Rechner gehen vor.
     cpus: 1.0
     cpu_shares: 512
