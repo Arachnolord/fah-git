@@ -1,6 +1,6 @@
 {
   "name": "fah-git",
-  "version": "1.17.1",
+  "version": "1.17.2",
   "description": "FAH-Git – schlanker Git-Server mit Ordnerbaum, Spiegeln und Import aus GitLab/Gitea",
   "type": "module",
   "private": true,

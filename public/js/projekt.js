@@ -46,7 +46,7 @@ export async function projektSeite(r, ctx) {
         h('div', { class: 'marken' },
           p.quelle ? h('span', { class: 'marker warn', title: 'Wird von dort aktualisiert; hier nur lesbar' }, sym('schloss'), `Kopie von ${new URL(p.quelle.url).host}`) : null,
           p.spiegel.length ? h('span', { class: `marker ${problem ? 'rot' : 'gruen'}` }, sym('spiegel'), `Weiterleitung an ${p.spiegel.length} Ziel${p.spiegel.length > 1 ? 'e' : ''}`) : null,
-          p.typ ? h('span', { class: `marker art ${p.typ}`, title: 'Art des Projekts – bestimmt die GitHub-Vorlage (Einstellungen des Projekts)' }, p.typ === 'app' ? 'App' : 'Docker') : null,
+          admin ? artWahl(p) : p.typ ? h('span', { class: `marker art ${p.typ}`, title: 'Art des Projekts – bestimmt die GitHub-Vorlage' }, p.typ === 'app' ? 'App' : 'Docker') : null,
           ...p.themen.map((t) => h('span', { class: 'marker grau' }, t)),
           p.zuletzt ? h('span', { class: 'marker grau' }, sym('uhr'), `geändert ${vorZeit(p.zuletzt)}`) : null,
           h('span', { class: 'marker grau' }, groesse(p.groesse)))),
@@ -801,6 +801,22 @@ function nurAnsehen(p) {
     p.quelle ? h('div', { class: 'karte' }, h('div', { class: 'karten-kopf' }, h('h2', {}, 'Kopie eines anderen Gits')),
       h('div', { class: 'karten-inhalt' }, h('p', { style: 'margin-top:0' }, 'Holt alle ', h('strong', {}, `${p.quelle.takt} Minuten`), ' den Stand von ', h('code', { style: 'overflow-wrap:anywhere' }, p.quelle.url), '.'),
         h('p', { style: 'margin-bottom:0' }, zustandText(p.quelle.zuletzt)))) : null);
+}
+
+/** Art schnell umstellen (1.17.2, Betreiber: „ich möchte aber auch schnell selbst projekte als APP oder DOCKER kennzeichnen
+ *  können“): Auswahl direkt im Projektkopf, speichert sofort. */
+function artWahl(p) {
+  const wahl = h('select', { class: `art-wahl marker art ${p.typ || 'leer'}`, 'aria-label': 'Art des Projekts',
+    title: 'Art des Projekts – bestimmt die GitHub-Vorlage (App: README, Bilder, Release · Docker: Quellcode)' },
+  [['', 'Art: –'], ['app', 'App'], ['docker', 'Docker']].map(([w, t]) => h('option', { value: w, selected: (p.typ || '') === w }, t)));
+  wahl.addEventListener('change', async () => {
+    try {
+      await api('PATCH', '/projekt', { pfad: p.pfad, typ: wahl.value });
+      p.typ = wahl.value; wahl.className = `art-wahl marker art ${p.typ || 'leer'}`;
+      meldung(p.typ ? `Als ${p.typ === 'app' ? 'App' : 'Docker'} gekennzeichnet` : 'Art entfernt');
+    } catch (e) { wahl.value = p.typ || ''; fehlerMelden(e); }
+  });
+  return wahl;
 }
 
 function einstellungenAnsicht(p, ctx) {
