@@ -88,7 +88,7 @@ export class Baum {
           const pfad = [...rel, e.name.slice(0, -4)].join('/');
           const m = meta.projekte[pfad] || {};
           knoten.projekte.push({ pfad, slug: e.name.slice(0, -4), name: m.name || e.name.slice(0, -4), beschreibung: m.beschreibung || '',
-            themen: m.themen || [], quelle: m.quelle ? { url: m.quelle.url } : null, spiegel: (m.spiegel || []).length,
+            themen: m.themen || [], typ: ['app', 'docker'].includes(m.typ) ? m.typ : '', quelle: m.quelle ? { url: m.quelle.url } : null, spiegel: (m.spiegel || []).length,
             zuletzt: m.zuletzt || m.erstellt || null });
         } else if (SEGMENT.test(e.name)) {
           const pfad = [...rel, e.name].join('/');

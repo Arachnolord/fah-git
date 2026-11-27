@@ -79,6 +79,9 @@ function ablageziel(el, zielPfad, nachher) {
 
 // --- Seitenleiste ---------------------------------------------------------------------------------------------------
 
+/** Art des Projekts als kleine Marke (1.17.1): App oder Docker – bestimmt die GitHub-Vorlage. */
+const artMarke = (p, klasse = 'art') => (p.typ ? h('span', { class: `${klasse} ${p.typ}`, title: p.typ === 'app' ? 'App – GitHub wie FAH-Friday: README, Bilder, Release' : 'Docker – GitHub mit Quellcode' }, p.typ === 'app' ? 'App' : 'Docker') : null);
+
 /**
  * @param {object} baum  Ergebnis von /api/baum
  * @param {string} aktiv aktueller Ordner- oder Projektpfad
@@ -108,7 +111,7 @@ export function seitenbaum(baum, aktiv, nachVerschieben, { ziehen = true } = {})
     for (const p of k.projekte) {
       const zeile = h('a', { href: projektUrl(p.pfad), class: `baum-zeile ${aktiv === p.pfad ? 'aktiv' : ''}`, title: p.beschreibung || p.name },
         h('span', { class: 'auf leer' }), sym('projekt', 'symbol-projekt'), h('span', { class: 'name' }, p.name),
-        p.quelle ? sym('schloss') : null);
+        artMarke(p), p.quelle ? sym('schloss') : null);
       if (ziehen) ziehbar(zeile, 'projekt', p.pfad);
       ziel.append(h('li', {}, zeile));
     }
@@ -147,6 +150,7 @@ export function grosseListe(knoten, neuZeichnen, nachVerschieben = null) {
       h('span', { class: 'auf leer' }), h('span', { class: 'gross-symbol projekt' }, initiale(p.name)),
       h('span', { style: 'min-width:0' }, h('div', { class: 'titel' }, p.name), p.beschreibung ? h('div', { class: 'beschr' }, p.beschreibung) : null),
       h('span', { class: 'rechts' },
+        artMarke(p, 'marker art'),
         p.quelle ? h('span', { class: 'marker grau', title: `Kopie von ${p.quelle.url}` }, sym('schloss'), 'Kopie') : null,
         p.spiegel ? h('span', { class: 'marker grau', title: 'Wird weitergeleitet' }, sym('spiegel'), p.spiegel) : null,
         p.zuletzt ? h('span', { class: 'zeit', title: new Date(p.zuletzt).toLocaleString('de-DE') }, vorZeit(p.zuletzt)) : null));

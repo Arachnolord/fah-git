@@ -46,7 +46,7 @@ export async function projektSeite(r, ctx) {
         h('div', { class: 'marken' },
           p.quelle ? h('span', { class: 'marker warn', title: 'Wird von dort aktualisiert; hier nur lesbar' }, sym('schloss'), `Kopie von ${new URL(p.quelle.url).host}`) : null,
           p.spiegel.length ? h('span', { class: `marker ${problem ? 'rot' : 'gruen'}` }, sym('spiegel'), `Weiterleitung an ${p.spiegel.length} Ziel${p.spiegel.length > 1 ? 'e' : ''}`) : null,
-          p.typ ? h('span', { class: 'marker gruen', title: 'Art des Projekts – bestimmt die GitHub-Vorlage (Einstellungen des Projekts)' }, p.typ === 'app' ? 'App' : 'Docker') : null,
+          p.typ ? h('span', { class: `marker art ${p.typ}`, title: 'Art des Projekts – bestimmt die GitHub-Vorlage (Einstellungen des Projekts)' }, p.typ === 'app' ? 'App' : 'Docker') : null,
           ...p.themen.map((t) => h('span', { class: 'marker grau' }, t)),
           p.zuletzt ? h('span', { class: 'marker grau' }, sym('uhr'), `geändert ${vorZeit(p.zuletzt)}`) : null,
           h('span', { class: 'marker grau' }, groesse(p.groesse)))),
