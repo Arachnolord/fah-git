@@ -20,7 +20,12 @@ import { Konten } from './konten.js';
 import { Aktivitaet } from './aktivitaet.js';
 import { Spiegel, regelVerletzt, zweigListe } from './spiegel.js';
 import { GitHub, neuNamePruefen, repoPruefen } from './github.js';
-import { bereinigungPruefen, WEGLASSEN_VORGABE, textPruefen, ersetzenVorbereiten } from './bereinigung.js';
+import { bereinigungPruefen, WEGLASSEN_VORGABE, textPruefen, ersetzenVorbereiten, nurPruefen } from './bereinigung.js';
+
+/** Vorlage „App“ (1.17.0): Vorgabe für „Nur diese Dateien“, solange in den Einstellungen nichts anderes steht. */
+export const APP_VORLAGE = { nur: ['/.github/README.md', '/.github/screenshots/**', '/docs/screenshots/**'] };
+/** Art eines Projekts (1.17.0, Betreiber: „projekte markieren können als APP oder als DOCKER“) – bestimmt die GitHub-Vorlage. */
+export const PROJEKT_ARTEN = ['app', 'docker', ''];
 import { Sicherung } from './sicherung.js';
 import { absender, gitAnfrage, gitBearbeiter } from './githttp.js';
 import { uebernehmen } from './importer.js';
@@ -138,12 +143,20 @@ export function erstelleServer({ daten, oeffentlicheAdresse = '', github: github
   const githubZugang = async () => { const g = (await einstellungen()).github; return g && g.geheim ? { benutzer: g.konto, name: g.name || g.konto, geheim: g.geheim, web: gh.web } : null; };
   // Bereinigung für den öffentlichen Stand (1.9.0): eigener Schlüssel, damit „GitHub trennen“ die Regeln nicht löscht.
   const bereinigungLesen = async () => (await einstellungen()).github_bereinigung || { ersetzen: [], verboten: [], weglassen: [...WEGLASSEN_VORGABE] };
+  // GitHub-Vorlagen je Projektart (1.17.0, Betreiber 27.11.2026: „kannst du in fah-git kein template erstellen sodass das bei
+  // APPS immer so angewandt wird?“ + „projekte markieren können als APP oder als DOCKER“):
+  //  App    – wie FAH-Friday: nur das öffentliche README (.github/README.md) und die Bilder, die App kommt als Release.
+  //  Docker – öffentlicher Stand mit Quellcode (bereinigt).
+  //  Beide: öffentlicher Stand, automatisch übertragen, neue Fassungen der öffentlichen Release-Datei gehen von selbst raus.
+  const appVorlage = async () => ({ nur: ((await einstellungen()).github_app_vorlage || {}).nur || APP_VORLAGE.nur });
+  const projektArt = async (pfad) => { const t = (await baum.projektMeta(pfad)).typ; return PROJEKT_ARTEN.includes(t) ? t : ''; };
+  const istApp = async (pfad) => (await projektArt(pfad)) === 'app';
   const githubToken = async () => {
     const g = await githubZugang();
     if (!g) throw new HttpFehler(400, 'GitHub-Zugang fehlt – unter Einstellungen → GitHub hinterlegen');
     return speicher.entschluesseln(g.geheim);
   };
-  const spiegel = new Spiegel({ speicher, baum, aktivitaet, regeln: async () => (await einstellungen()).ziel_regeln || [], github: githubZugang, bereinigung: bereinigungLesen,
+  const spiegel = new Spiegel({ speicher, baum, aktivitaet, regeln: async () => (await einstellungen()).ziel_regeln || [], github: githubZugang, bereinigung: bereinigungLesen, istApp,
     githubInfo: async (r) => gh.repoInfo(await githubToken(), r) });
   const sicherung = new Sicherung({ speicher, baum, konten, einstellungen, version: VERSION });
   const auftraege = new Map();
@@ -221,7 +234,7 @@ export function erstelleServer({ daten, oeffentlicheAdresse = '', github: github
     const standard = await baum.standardZweig(pfad);
     const [zw, tg] = leer ? [[], []] : await Promise.all([repo.zweige(r), repo.tags(r)]);
     return {
-      pfad, slug: teile(pfad).at(-1), name: meta.name || teile(pfad).at(-1), beschreibung: meta.beschreibung || '', themen: meta.themen || [],
+      pfad, slug: teile(pfad).at(-1), name: meta.name || teile(pfad).at(-1), beschreibung: meta.beschreibung || '', themen: meta.themen || [], typ: PROJEKT_ARTEN.includes(meta.typ) ? meta.typ : '',
       erstellt: meta.erstellt || null, zuletzt: meta.zuletzt || null, herkunft: meta.herkunft || null,
       leer, standard, zweige: zw, tags: tg, klon: await klonAdresse(req, pfad), groesse: await repo.groesse(r),
       bereinigung: { weggelassen: ((meta.bereinigung || {}).weglassen || []).length, freigegeben: ((meta.bereinigung || {}).freigaben || []).length, nur: (meta.bereinigung || {}).nur || [] },
@@ -575,8 +588,13 @@ export function erstelleServer({ daten, oeffentlicheAdresse = '', github: github
         const jetzt = (await baum.projektMeta(pfad)).name || teile(pfad).at(-1);
         if ((String(b.name).trim().slice(0, 100) || jetzt) !== jetzt) throw new HttpFehler(403, 'Umbenennen dürfen nur Administratoren');
       }
+      if (b.typ !== undefined) {
+        if (!ich.admin) throw new HttpFehler(403, 'Die Art des Projekts ändern nur Administratoren');
+        if (!PROJEKT_ARTEN.includes(b.typ)) throw new HttpFehler(400, 'Art: „app“, „docker“ oder leer');
+      }
       if (b.standard) await baum.standardZweigSetzen(pfad, String(b.standard));
       await baum.projektAendern(pfad, (p) => {
+        if (b.typ !== undefined) { if (b.typ) p.typ = b.typ; else delete p.typ; }
         if (b.name != null) p.name = String(b.name).trim().slice(0, 100) || p.name;
         if (b.beschreibung != null) p.beschreibung = String(b.beschreibung).slice(0, 2000);
         if (Array.isArray(b.themen)) p.themen = b.themen.map((t) => String(t).trim()).filter(Boolean).slice(0, 20);
@@ -769,9 +787,11 @@ export function erstelleServer({ daten, oeffentlicheAdresse = '', github: github
       if (!Array.isArray(b.verboten || []) || (b.verboten || []).length > 20) throw new HttpFehler(400, 'Verboten: Liste mit höchstens 20 Einträgen');
       const verboten = (b.verboten || []).map((v) => String(v).trim().slice(0, 100)).filter(Boolean);
       let auto = false;
+      const art = await projektArt(pfad);
       await baum.projektAendern(pfad, (p) => {
         const alt = p.releases || {};
-        auto = b.auto === undefined ? alt.auto === true : b.auto === true;
+        // ohne Angabe: bisheriger Wert; bei App/Docker beim ersten Zuordnen „automatisch“ (Vorlage, 1.17.0)
+        auto = b.auto === undefined ? alt.auto === true || (!!art && !p.releases) : b.auto === true;
         p.releases = { dateien, oeffentlich, verboten, ...(auto ? { auto: true } : {}),
           // ein Fehler gilt nur für die Datei, bei der er auftrat
           ...(alt.autoFehler && alt.autoFehler.datei === oeffentlich ? { autoFehler: alt.autoFehler } : {}) };
@@ -799,7 +819,10 @@ export function erstelleServer({ daten, oeffentlicheAdresse = '', github: github
         // GitHub: Repo wählen oder neu (privat) anlegen. Übertragen wird nur, wenn der Betreiber es will („jetzt“ oder später von Hand).
         const token = await githubToken();
         const name = b.github_neu ? neuNamePruefen(b.github_neu) : null;
-        const modus = b.modus === 'oeffentlich' ? 'oeffentlich' : 'voll';
+        const art = await projektArt(pfad); const app = art === 'app';
+        // App/Docker (1.17.0): ohne ausdrückliche Wahl öffentlicher Stand und automatisch
+        const modus = b.modus === 'oeffentlich' || (art && b.modus === undefined) ? 'oeffentlich' : 'voll';
+        const autoWahl = b.auto === true || (!!art && b.auto === undefined);
         // Erst alles prüfen, dann auf GitHub anlegen – sonst bliebe bei Regel-/Zweigfehlern ein verwaistes Repo zurück.
         zweigListe(b.zweige);
         const grund = regelVerletzt((await einstellungen()).ziel_regeln || [], pfad, `${gh.web}/x/y.git`);
@@ -816,9 +839,14 @@ export function erstelleServer({ daten, oeffentlicheAdresse = '', github: github
           // 1.15.4: von FAH-Git für DIESES Projekt angelegt und nie voll gespiegelt → bleibt veröffentlichbar
           neu = await spiegel.wiederVeroeffentlichbar(ghid, pfad, modus);
         }
-        const s = await spiegel.githubAnlegen(pfad, { repo: repoName, url: gh.pushAdresse(repoName), auto: b.auto === true, zweige: b.zweige, modus, sichtbarkeit, neu, ghid });
+        const s = await spiegel.githubAnlegen(pfad, { repo: repoName, url: gh.pushAdresse(repoName), auto: autoWahl, zweige: b.zweige, modus, sichtbarkeit, neu, ghid });
         if (modus === 'voll') await spiegel.eigenesRepoBelasten(ghid);
-        if (Array.isArray(b.nur)) await spiegel.befund(pfad, { aktion: 'nur', fps: b.nur });
+        if (Array.isArray(b.nur) && b.nur.length) await spiegel.befund(pfad, { aktion: 'nur', fps: b.nur });
+        else if (app && modus === 'oeffentlich' && !(((await baum.projektMeta(pfad)).bereinigung || {}).nur || []).length) {
+          await spiegel.befund(pfad, { aktion: 'nur', fps: (await appVorlage()).nur });      // Vorlage: nur README + Bilder
+        } else if (Array.isArray(b.nur)) await spiegel.befund(pfad, { aktion: 'nur', fps: b.nur });
+        // App/Docker: neue Fassungen der öffentlichen Release-Datei gehen von selbst raus
+        if (art && modus === 'oeffentlich') await baum.projektAendern(pfad, (p) => { p.releases = { dateien: [], oeffentlich: null, verboten: [], ...(p.releases || {}), auto: true }; });
         if (b.jetzt === true) spiegel.weiterleiten(pfad, s.id).catch(() => {});
         return json(res, 200, s);
       }
@@ -948,7 +976,18 @@ export function erstelleServer({ daten, oeffentlicheAdresse = '', github: github
       }
       liste.sort((x, y) => x.name.localeCompare(y.name, 'de'));
       return json(res, 200, { eingerichtet: !!(g && g.geheim), konto: g ? g.konto : null, geprueft: g ? g.geprueft : null, spiegel: liste,
-        bereinigung: await bereinigungLesen(), weglassen_vorgabe: WEGLASSEN_VORGABE });
+        bereinigung: await bereinigungLesen(), weglassen_vorgabe: WEGLASSEN_VORGABE, app_vorlage: await appVorlage() });
+    }
+    if (weg === '/github/app-vorlage' && m === 'PUT') {
+      const b = await koerper(req);
+      const liste = (x, max) => {
+        if (!Array.isArray(x) || x.length > max) throw new HttpFehler(400, `Bitte eine Liste mit höchstens ${max} Einträgen`);
+        return [...new Set(x.map((y) => String(y).trim()).filter(Boolean))];
+      };
+      const nur = nurPruefen(liste(b.nur, 50));
+      if (!nur.length) throw new HttpFehler(400, 'Mindestens ein Muster für „Nur diese Dateien“, z. B. /.github/README.md');
+      await speicher.aendern('einstellungen.json', {}, (e) => { e.github_app_vorlage = { nur }; });
+      return json(res, 200, await appVorlage());
     }
     if (weg === '/github' && m === 'PUT') {
       const b = await koerper(req);

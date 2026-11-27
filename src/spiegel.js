@@ -92,7 +92,8 @@ export class Spiegel {
   /**
    * @param {object} o {speicher, baum, aktivitaet}
    */
-  constructor({ speicher, baum, aktivitaet, regeln = async () => [], github = async () => null, bereinigung = async () => null, githubInfo = null }) {
+  constructor({ speicher, baum, aktivitaet, regeln = async () => [], github = async () => null, bereinigung = async () => null, githubInfo = null, istApp = null }) {
+    this.istApp = istApp;         // pfad → true bei Apps (Vorlage „App“, 1.17.0)
     this.githubInfo = githubInfo; // repo → {privat} live von GitHub (vor jedem Vollspiegel-Push)
     this.speicher = speicher;
     this.regeln = regeln;
@@ -358,6 +359,11 @@ export class Spiegel {
       if (!baum) return { gesperrt: true, bericht, zweig: z };
       // Nie einen LEEREN Stand übertragen (z. B. „Nur diese Dateien“ trifft im Zweig nichts) – das würde GitHub leeren
       if (!bericht.dateien) throw Object.assign(new Error(`Im Zweig ${z} bleibt keine einzige Datei übrig – „Nur diese Dateien“/„Weglassen“ prüfen. Nichts übertragen.`), { klar: true, status: 400 });
+      // Vorlage „App“ (1.17.0): ohne öffentliches README sähe das Repo auf GitHub leer aus – dann lieber gar nicht
+      if (this.istApp && await this.istApp(pfad)) {
+        const readme = (await gitText(['ls-tree', '--name-only', baum, '.github/README.md'], { cwd: repo }).catch(() => '')).trim();
+        if (!readme) throw Object.assign(new Error(`App-Vorlage: Im Zweig ${z} fehlt .github/README.md – das öffentliche README (Download-Link aufs Release, Bilder, Erster Start, wie bei FAH-Friday) zuerst anlegen. Nichts übertragen.`), { klar: true, status: 400 });
+      }
       ersetzt = Math.max(ersetzt, bericht.ersetzt.length); weggelassen = Math.max(weggelassen, bericht.weggelassen.length);
       const ref = `refs/fahgit/oeffentlich/${s.id}/${z}`;
       const eltern = (await gitText(['rev-parse', '--verify', '-q', ref], { cwd: repo }).catch(() => '')).trim() || null;

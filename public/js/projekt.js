@@ -46,6 +46,7 @@ export async function projektSeite(r, ctx) {
         h('div', { class: 'marken' },
           p.quelle ? h('span', { class: 'marker warn', title: 'Wird von dort aktualisiert; hier nur lesbar' }, sym('schloss'), `Kopie von ${new URL(p.quelle.url).host}`) : null,
           p.spiegel.length ? h('span', { class: `marker ${problem ? 'rot' : 'gruen'}` }, sym('spiegel'), `Weiterleitung an ${p.spiegel.length} Ziel${p.spiegel.length > 1 ? 'e' : ''}`) : null,
+          p.typ ? h('span', { class: 'marker gruen', title: 'Art des Projekts – bestimmt die GitHub-Vorlage (Einstellungen des Projekts)' }, p.typ === 'app' ? 'App' : 'Docker') : null,
           ...p.themen.map((t) => h('span', { class: 'marker grau' }, t)),
           p.zuletzt ? h('span', { class: 'marker grau' }, sym('uhr'), `geändert ${vorZeit(p.zuletzt)}`) : null,
           h('span', { class: 'marker grau' }, groesse(p.groesse)))),
@@ -401,7 +402,7 @@ async function sichtbarkeitAendern(p, s, oeffentlich) {
 }
 
 /** Felder „Was übertragen?“ und „Wann?“ – für Neu und Ändern. */
-function wasWannFelder(p, s = null) {
+function wasWannFelder(p, s = null, vorlage = null) {
   const oeff = h('input', { type: 'radio', name: 'gh-art', checked: !s || oeffentlichMod(s) });
   const voll = h('input', { type: 'radio', name: 'gh-art', checked: !!(s && !oeffentlichMod(s)), disabled: !!(s && s.sichtbarkeit === 'oeffentlich') });
   const allesText = h('span', {});
@@ -411,11 +412,19 @@ function wasWannFelder(p, s = null) {
   const box = h('div', { style: 'margin:4px 0 0 28px' }, haken.map((x) => h('label', { class: 'haken' }, x.feld, h('code', {}, x.name))));
   const zeigen = () => { box.hidden = !nurZweige.checked; allesText.textContent = oeff.checked ? `Nur den Standardzweig (${p.standard || 'main'})` : 'Alle Zweige und Tags'; nurFeld.hidden = !oeff.checked; };
   for (const x of [alles, nurZweige, oeff, voll]) x.addEventListener('change', zeigen);
-  const auto = h('input', { type: 'checkbox', checked: !!(s && s.auto) });
-  const nur = h('textarea', { rows: 3, spellcheck: 'false', class: 'mono', placeholder: 'build/*.app/**\n/README.md' }, ((p.bereinigung && p.bereinigung.nur) || []).join('\n'));
+  // Vorlage „App“ (1.17.0): beim Verbinden einer App automatisch und nur öffentliches README + Bilder
+  const vorlageNeu = !!(vorlage && !s);
+  const auto = h('input', { type: 'checkbox', checked: !!(s ? s.auto : vorlageNeu) });
+  const nurBisher = (p.bereinigung && p.bereinigung.nur) || [];
+  const nur = h('textarea', { rows: 3, spellcheck: 'false', class: 'mono', placeholder: '/.github/README.md\n/docs/screenshots/**' },
+    (nurBisher.length || !vorlageNeu ? nurBisher : vorlage.nur || []).join('\n'));
   const nurFeld = feld('Nur diese Dateien (leer = alle)', nur, 'Ein Muster je Zeile (gilt für dieses Projekt). Z. B. für eine Mac-App nur die fertige App: „build/*.app/**“ und „/README.md“ – dann gehen Quellen und Bauskripte nicht mit. ** = beliebige Ordner, * = beliebige Zeichen; „/“ vorne = nur im Hauptordner (ohne: in jedem Ordner).');
   zeigen();
   const el = h('div', {},
+    vorlageNeu ? h('div', { class: 'hinweisbox', style: 'margin-bottom:12px' }, sym('info'), vorlage.art === 'app'
+      ? h('div', {}, h('strong', {}, 'Vorlage „App“: '), 'Auf GitHub liegen nur das öffentliche README (', h('code', {}, '.github/README.md'),
+        ') und die Bilder, die App selbst kommt als Release. Übertragen und neue Releases laufen automatisch. Fehlt das README, überträgt FAH-Git nichts und sagt, was fehlt.')
+      : h('div', {}, h('strong', {}, 'Vorlage „Docker“: '), 'Öffentlicher Stand mit Quellcode (bereinigt), automatisch übertragen; neue Fassungen der öffentlichen Release-Datei gehen von selbst raus.')) : null,
     h('div', { class: 'feld' }, h('label', {}, 'Wie wird übertragen?'),
       h('div', {},
         h('label', { class: 'haken' }, oeff, h('span', {}, h('div', {}, 'Öffentlicher Stand (bereinigt, ohne Verlauf)'),
@@ -484,7 +493,7 @@ async function githubNeu(p) {
   suche.addEventListener('input', zeichnen);
   auswahl.addEventListener('change', () => { gewaehlt = auswahl.value; hinweisZeigen(); });
   zeichnen();
-  const ww = wasWannFelder(p);
+  const ww = wasWannFelder(p, null, p.typ ? { art: p.typ, nur: p.typ === 'app' ? zugang.app_vorlage.nur : [] } : null);
   const jetzt = h('input', { type: 'checkbox', checked: true });
   const r = await dialog('Zu GitHub übertragen', h('div', {},
     feld(`GitHub-Repo (Konto ${zugang.konto})`, h('div', {}, suche, h('div', { style: 'margin-top:6px' }, auswahl), hinweis), 'Alle Repos, an die dein Token herankommt. Grau = schon mit diesem Projekt verbunden oder ohne Schreibrecht.'),
@@ -800,16 +809,19 @@ function einstellungenAnsicht(p, ctx) {
   const beschreibung = h('textarea', {}, p.beschreibung);
   const themen = h('input', { type: 'text', value: p.themen.join(', '), placeholder: 'z. B. docker, python' });
   const standard = h('select', {}, p.zweige.map((z) => h('option', { value: z.name, selected: z.name === p.standard }, z.name)));
+  const art = h('select', { disabled: !admin }, [['', 'Sonstiges (ohne Vorlage)'], ['app', 'App (Mac/Windows/…)'], ['docker', 'Docker']].map(([w, t]) => h('option', { value: w, selected: (p.typ || '') === w }, t)));
   const form = h('form', { class: 'karte abschnitt' }, h('div', { class: 'karten-kopf' }, h('h2', {}, 'Allgemein')), h('div', { class: 'karten-inhalt' },
     feld('Name', name, admin ? 'Anzeigename. Die Klon-Adresse bleibt gleich (die änderst du über „Verschieben“).' : 'Umbenennen dürfen nur Administratoren.'),
     feld('Beschreibung', beschreibung),
     feld('Themen', themen, 'Stichworte, durch Komma getrennt. Erscheinen als Marken am Projekt.'),
+    feld('Art', art, 'Bestimmt die GitHub-Vorlage. App: auf GitHub nur das öffentliche README (.github/README.md) und die Bilder, die App als Release. Docker: Quellcode (bereinigt). Beide: automatisch übertragen, Releases automatisch.'),
     p.zweige.length ? feld('Standardzweig', standard, 'Wird beim Klonen ausgecheckt und in der Dateiansicht zuerst gezeigt.') : null,
     h('button', { class: 'knopf haupt', type: 'submit' }, 'Speichern')));
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     try {
       await api('PATCH', '/projekt', { pfad: p.pfad, name: name.value, beschreibung: beschreibung.value, themen: themen.value.split(',').map((t) => t.trim()).filter(Boolean),
+        ...(admin && art.value !== (p.typ || '') ? { typ: art.value } : {}),
         ...(p.zweige.length && standard.value !== p.standard ? { standard: standard.value } : {}) });
       meldung('Gespeichert'); await ctx.baumLaden(); location.reload();
     } catch (err) { fehlerMelden(err); }

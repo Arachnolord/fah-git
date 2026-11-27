@@ -768,7 +768,29 @@ async function githubZeichnen(karte) {
           h('div', { class: 'klein', style: 'margin-top:4px' }, zustandText(x.zuletzt))),
         h('button', { class: 'knopf klein', type: 'button', disabled: !g.eingerichtet, onclick: jetzt(x) }, 'Jetzt zu GitHub'))))
       : h('div', { class: 'leer-hinweis' }, 'Noch kein Projekt mit GitHub verbunden.'),
-    bereinigungFormular(g));
+    bereinigungFormular(g),
+    appVorlageFormular(g));
+}
+
+// Vorlage „App“ (1.17.0): Projekte in diesen Ordnern sehen auf GitHub aus wie FAH-Friday.
+function appVorlageFormular(g) {
+  const v = g.app_vorlage || { nur: [] };
+  const nur = h('textarea', { rows: 3, spellcheck: 'false', class: 'mono', placeholder: '/.github/README.md' }, v.nur.join('\n'));
+  const zeilen = (t) => t.value.split('\n').map((x) => x.trim()).filter(Boolean);
+  const form = h('form', { class: 'karten-inhalt', style: 'border-top:1px solid var(--rand)' },
+    h('h3', { style: 'margin-top:0' }, 'Vorlagen je Projektart'),
+    info('Die Art stellst du am Projekt ein (Einstellungen → Art). Beim Verbinden mit GitHub gilt dann – App: öffentlicher Stand, nur die Dateien unten (das öffentliche README unter .github/README.md und die Bilder), die App kommt als Release; ohne .github/README.md überträgt FAH-Git nichts. Docker: öffentlicher Stand mit Quellcode. Beide: automatisch übertragen, neue Fassungen der öffentlichen Release-Datei gehen von selbst raus.'),
+    feld('App: nur diese Dateien', nur, 'Ein Muster je Zeile, wie „Nur diese Dateien“ am Projekt. „/“ vorne = nur im Hauptordner.'),
+    h('div', { class: 'zeile' }, h('button', { class: 'knopf haupt', type: 'submit' }, 'Vorlage speichern')));
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    try {
+      const neu = await api('PUT', '/github/app-vorlage', { nur: zeilen(nur) });
+      nur.value = neu.nur.join('\n');
+      meldung('Vorlage gespeichert – gilt für neue GitHub-Verbindungen von Apps');
+    } catch (err) { fehlerMelden(err); }
+  });
+  return form;
 }
 
 // Bereinigung für „Öffentlicher Stand“ (1.9.0): zentrale Regeln. Persönliches steht nur hier (einstellungen.json), nie im Code.

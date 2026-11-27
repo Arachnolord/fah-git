@@ -62,6 +62,10 @@ Textdateien direkt im Browser bearbeiten – „Bearbeiten“, tippen, speichern
   im Reiter Releases): Liegt eine neue Fassung der öffentlichen Datei in der Ablage (älter als 2 Minuten), prüft und
   veröffentlicht FAH-Git sie innerhalb von 5 Minuten; scheitert eine Fassung, steht der Grund am Projekt und in der Aktivität.
   Ist der Stand schon das Release auf GitHub, meldet der Knopf „schon aktuell“.
+- Art je Projekt (1.17.0, Projekt → Einstellungen → Art): „App“ oder „Docker“ bestimmt die GitHub-Vorlage beim Verbinden.
+  App: wie FAH-Friday nur das öffentliche README (`.github/README.md`) und die Bilder, die App kommt als Release; ohne
+  `.github/README.md` überträgt FAH-Git nichts. Docker: öffentlicher Stand mit Quellcode. Beide: automatisch übertragen,
+  Releases automatisch. Die App-Muster stehen unter Einstellungen → GitHub → Vorlagen je Projektart.
   Schutz: Namen nach Schlüssel/Privatem („NICHT VERTEILEN“, „privat“, „Nur für …“, „API KEYS“, `.hex`, `.pem` …) sind
   gesperrt; keine Verweise/harten Links, Pfade bleiben in der Ablage. ZIPs werden über Inhaltsverzeichnis UND Dateiköpfe
   lückenlos gelesen; ZIPs mit Schlüssel- oder Zugangsdateien bzw. `.git`-Ordner lassen sich gar nicht zuordnen (`.env`-Vorlagen wie `.env.example` oder `.env.edeka.example` sind erlaubt, solange der Name auf die Vorlagen-Endung endet – 1.15.3). Vor dem
