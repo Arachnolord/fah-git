@@ -20,7 +20,7 @@ import { Konten } from './konten.js';
 import { Aktivitaet } from './aktivitaet.js';
 import { Spiegel, regelVerletzt, zweigListe } from './spiegel.js';
 import { GitHub, neuNamePruefen, repoPruefen } from './github.js';
-import { bereinigungPruefen, WEGLASSEN_VORGABE } from './bereinigung.js';
+import { bereinigungPruefen, WEGLASSEN_VORGABE, textPruefen, ersetzenVorbereiten } from './bereinigung.js';
 import { Sicherung } from './sicherung.js';
 import { absender, gitAnfrage, gitBearbeiter } from './githttp.js';
 import { uebernehmen } from './importer.js';
@@ -239,11 +239,15 @@ export function erstelleServer({ daten, oeffentlicheAdresse = '', github: github
    * Release auf GitHub anlegen, Datei als Strom anhängen, danach ältere Releases + Tags entfernen (nur das neueste bleibt,
    * Betreiber 23.11.2026). Gemeinsam für „Release hochladen“ (Datei aus dem Browser) und „aus der Ablage“ (1.12.0).
    */
-  async function releaseVeroeffentlichen(pfad, s, { tag, titel, text, datei, strom, groesse, ich, quelle }) {
+  async function releaseVeroeffentlichen(pfad, s, { tag, titel, text, datei, strom, groesse, ich, quelle, nachDemHochladen }) {
     const token = await githubToken();
     const zweig = Array.isArray(s.zweige) && s.zweige.length ? s.zweige[0] : await baum.standardZweig(pfad);
     const rel = await gh.releaseAnlegen(token, s.repo, { tag, name: String(titel || '').slice(0, 200) || tag, text: String(text || '').slice(0, 5000), zweig });
-    const d = await gh.releaseDatei(token, rel.upload, datei, strom, groesse, /\.zip$/i.test(datei) ? 'application/zip' : 'application/octet-stream');
+    let d;
+    try {
+      d = await gh.releaseDatei(token, rel.upload, datei, strom, groesse, /\.zip$/i.test(datei) ? 'application/zip' : 'application/octet-stream');
+      if (nachDemHochladen) await nachDemHochladen();          // z. B. Datei während des Hochladens verändert → Release zurücknehmen
+    } catch (e) { await gh.releaseLoeschen(token, s.repo, rel.id, tag); throw e; }
     let entfernt = { releases: [], tags: [], fehler: [] };
     try { entfernt = await gh.aeltereReleasesEntfernen(token, s.repo, tag); } catch (e) { entfernt.fehler.push(e.message); }
     await baum.projektAendern(pfad, (p) => {
@@ -607,7 +611,9 @@ export function erstelleServer({ daten, oeffentlicheAdresse = '', github: github
       }
       const oeffentlich = b.oeffentlich ? ablage.rel(b.oeffentlich) : null;
       if (oeffentlich && !dateien.includes(oeffentlich)) throw new HttpFehler(400, 'Die öffentliche Datei muss zugeordnet sein');
-      if (oeffentlich && !PRUEFBAR.test(oeffentlich)) throw new HttpFehler(400, 'Öffentlich kann nur eine ZIP sein – nur deren Inhalt lässt sich vorher prüfen');
+      if (oeffentlich && !PRUEFBAR.test(oeffentlich) && (await ablage.vermerkZustand(oeffentlich, (await ablage.info(oeffentlich)).groesse)) !== 'ok') {
+        throw new HttpFehler(400, 'Öffentlich kann nur eine ZIP sein oder eine Datei mit Prüfvermerk des Bauskripts (<datei>.pruefung.json)');
+      }
       if (!Array.isArray(b.verboten || []) || (b.verboten || []).length > 20) throw new HttpFehler(400, 'Verboten: Liste mit höchstens 20 Einträgen');
       const verboten = (b.verboten || []).map((v) => String(v).trim().slice(0, 100)).filter(Boolean);
       await baum.projektAendern(pfad, (p) => { p.releases = { dateien, oeffentlich, verboten }; });
@@ -826,13 +832,23 @@ export function erstelleServer({ daten, oeffentlicheAdresse = '', github: github
       const f = await ablage.oeffnen(r.oeffentlich);
       let strom = null;
       try {
-        await ablage.oeffentlichPruefen(f, r.verboten || []);
+        // Private Regeln des GitHub-Spiegels auch auf die Inhalte einer ISO anwenden (Begriffe selbst nie ausgeben)
+        const bg = await bereinigungLesen();
+        const verbotenAlle = [...new Set([...(bg.verboten || []), ...ersetzenVorbereiten(bg.ersetzen || []).filter((x) => x.klartext && x.klartext.trim().length >= 4).map((x) => x.klartext.trim())])];
+        const textPruefer = (rel, text) => textPruefen(text, rel, verbotenAlle).filter((x) => ['privat', 'schluessel', 'token'].includes(x.art))
+          .map((x) => `${x.art === 'privat' ? 'privater Begriff laut Bereinigung' : x.text}, Zeile ${x.zeile}`);
+        await ablage.oeffentlichPruefen(f, r.verboten || [], { textPruefer });
+        const vorher = await f.fh.stat();
         if (f.groesse > 2 * 1024 * 1024 * 1024 - 1) throw new HttpFehler(413, 'GitHub nimmt je Release-Datei höchstens 2 GB');
         if (!/^[A-Za-z0-9][A-Za-z0-9 ._()-]{0,150}$/.test(f.name)) throw new HttpFehler(400, 'Dateiname: Buchstaben, Ziffern, Leerzeichen, Punkt, Minus, Klammern');
         const tag = String(b.version || '').trim() || versionAusZeit(f.zeit);
         if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,60}$/.test(tag)) throw new HttpFehler(400, 'Version: Buchstaben, Ziffern, Punkt, Minus (z. B. 2026.11.20 oder v1.2.0)');
-        strom = f.fh.createReadStream({ start: 0, end: f.groesse - 1, autoClose: false });
-        return json(res, 200, await releaseVeroeffentlichen(pfad, s, { tag, titel: b.titel, text: b.text, datei: f.name, strom, groesse: f.groesse, ich, quelle: r.oeffentlich }));
+        strom = f.fh.createReadStream({ start: 0, end: f.groesse - 1, autoClose: false, highWaterMark: 1024 * 1024 });
+        const nachDemHochladen = async () => {
+          const n = await f.fh.stat();
+          if (n.size !== vorher.size || n.mtimeMs !== vorher.mtimeMs || n.ctimeMs !== vorher.ctimeMs) throw new HttpFehler(409, 'Die Datei wurde während des Hochladens verändert – Release zurückgenommen');
+        };
+        return json(res, 200, await releaseVeroeffentlichen(pfad, s, { tag, titel: b.titel, text: b.text, datei: f.name, strom, groesse: f.groesse, ich, quelle: r.oeffentlich, nachDemHochladen }));
       } finally { if (strom) strom.destroy(); await f.fh.close().catch(() => {}); }
     }
     if (weg === '/github/sichtbarkeit' && m === 'POST') {

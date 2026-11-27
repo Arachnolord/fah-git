@@ -147,13 +147,20 @@ export class GitHub {
     return aus;
   }
 
+  /** Ein gerade angelegtes Release samt Tag wieder löschen (z. B. wenn sich die Datei während des Hochladens änderte). */
+  async releaseLoeschen(token, repo, id, tag) {
+    const r = repoPruefen(repo);
+    await this.anfrage(token, 'DELETE', `/repos/${r}/releases/${Number(id)}`).catch(() => {});
+    if (tag) await this.anfrage(token, 'DELETE', `/repos/${r}/git/refs/tags/${String(tag).split('/').map(encodeURIComponent).join('/')}`).catch(() => {});
+  }
+
   /** Datei als Strom an ein Release hängen (ohne Zwischendatei). */
   async releaseDatei(token, upload, dateiname, strom, groesse, typ = 'application/octet-stream') {
     if (!upload.startsWith(`${this.uploads}/`)) throw fehler('Unerwartete Upload-Adresse', 400);
     let r;
     try {
       r = await fetch(`${upload}?name=${encodeURIComponent(dateiname)}`, {
-        method: 'POST', body: strom, duplex: 'half', redirect: 'error', signal: AbortSignal.timeout(60 * 60_000),
+        method: 'POST', body: strom, duplex: 'half', redirect: 'error', signal: AbortSignal.timeout(3 * 60 * 60_000),
         headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'User-Agent': 'FAH-Git', 'Content-Type': typ, 'Content-Length': String(groesse) },
       });
     } catch { throw fehler('Hochladen zu GitHub abgebrochen – Netz prüfen', 502); }

@@ -63,7 +63,12 @@ Textdateien direkt im Browser bearbeiten – „Bearbeiten“, tippen, speichern
   gesperrt; keine Verweise/harten Links, Pfade bleiben in der Ablage. ZIPs werden über Inhaltsverzeichnis UND Dateiköpfe
   lückenlos gelesen; ZIPs mit Schlüssel- oder Zugangsdateien bzw. `.git`-Ordner lassen sich gar nicht zuordnen. Vor dem
   Veröffentlichen sperren zusätzlich verschachtelte Archive und je Projekt verbotene Pfade (z. B. `lokale-stimme/`).
-  Öffentlich kann nur eine ZIP sein – nur deren Inhalt ist prüfbar. Geprüft und hochgeladen wird aus demselben Dateigriff.
+  Öffentlich kann eine ZIP sein (Inhalt geprüft) oder – seit 1.13.0 – eine andere Datei (z. B. Installer-ISO) mit Prüfvermerk
+  des Bauskripts daneben (`<datei>.pruefung.json` mit `datei`, `groesse`, `sha256`, `werkzeug`): FAH-Git rechnet die
+  Prüfsumme vor dem Hochladen nach. Eine ISO liest FAH-Git zusätzlich selbst (ISO 9660 mit Rock Ridge): alle Pfade, die
+  eigenen Teile (`/fahnas`, `/nocloud`, GRUB-Menüs) und darin liegende `.tar.gz` (entpackt) gegen Schlüssel-Namen, die je
+  Projekt verbotenen Pfade und die privaten Begriffe der GitHub-Bereinigung (Funde nennen nie den Begriff). Geprüft und
+  hochgeladen wird aus demselben Dateigriff; ändert sich die Datei während des Hochladens, nimmt FAH-Git das Release zurück.
 - Im Browser bearbeiten (1.11.0): In der Dateiansicht einer Textdatei „Bearbeiten“ → Editor-Textfeld (Tab fügt einen
   Tabulator ein, Cmd/Strg+S speichert). Speichern legt einen Commit auf den Zweig; eine zwischenzeitliche Änderung wird
   erkannt und nicht überschrieben. Nur mit Schreibrecht, nicht in nur-lesbaren Kopien.

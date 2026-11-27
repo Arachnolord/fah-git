@@ -11,10 +11,15 @@
 //   - Namen, die nach Schlüssel/Privatem klingen, sind GESPERRT: nicht zuordenbar, nicht herunterladbar, nie öffentlich
 //   - ZIPs: Inhaltsverzeichnis UND lokale Dateiköpfe werden lückenlos abgeglichen (keine versteckten Einträge);
 //     Schlüssel-/Zugangsdateien, .git-Ordner und verschachtelte Archive sperren die Zuordnung, je Projekt verbotene
-//     Teilpfade (z. B. „lokale-stimme/“) sperren das Veröffentlichen. Öffentlich kann nur eine ZIP sein (nur die ist prüfbar).
+//     Teilpfade (z. B. „lokale-stimme/“) sperren das Veröffentlichen.
+//   - Öffentlich: eine ZIP (Inhalt geprüft) oder (1.13.0) eine andere Datei, z. B. eine Installer-ISO, NUR mit Prüfvermerk
+//     des Bauskripts daneben (<datei>.pruefung.json mit Größe + SHA-256) – das Bauskript hat dort selbst bereinigt und
+//     geprüft; FAH-Git rechnet die Prüfsumme vor dem Hochladen aus demselben Dateigriff nach.
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
+import zlib from 'node:zlib';
 
 export const RELEASE_ENDUNG = /\.(zip|iso|dmg|pkg|tar\.gz|tgz|7z|pdf|apk|exe|msi|img)$/i;
 export const PRUEFBAR = /\.(zip|apk|jar)$/i;
@@ -39,6 +44,7 @@ const INHALT_DATEI = [
 ];
 const INHALT_ARCHIV = /\.(zip|7z|rar|tar|tgz|gz|bz2|xz|dmg|iso)$/i;
 const ZIP_VERZEICHNIS_MAX = 32 * 1024 * 1024;
+export const VERMERK_ENDUNG = '.pruefung.json';
 const ZIP_EINTRAEGE_MAX = 300000;
 
 export class AblageFehler extends Error {
@@ -114,7 +120,8 @@ export class Ablage {
       if (!e.isFile() || !RELEASE_ENDUNG.test(e.name)) continue;
       const st = await fsp.lstat(path.join(abs, e.name)).catch(() => null);
       if (!st) continue;
-      eintraege.push({ name: nameNorm(e.name), rel: r, ordner: false, groesse: st.size, zeit: st.mtime.toISOString(), gesperrt: this.gesperrt(r) });
+      eintraege.push({ name: nameNorm(e.name), rel: r, ordner: false, groesse: st.size, zeit: st.mtime.toISOString(), gesperrt: this.gesperrt(r),
+        vermerk: PRUEFBAR.test(e.name) ? null : await this.vermerkZustand(r, st.size) });
     }
     eintraege.sort((a, b) => (a.ordner === b.ordner ? a.name.localeCompare(b.name, 'de') : a.ordner ? -1 : 1));
     return { ordner: rel, eintraege };
@@ -127,7 +134,8 @@ export class Ablage {
     try {
       const st = await fsp.lstat(await this.abs(r));
       if (!st.isFile()) throw new Error('keine Datei');
-      return { rel: r, name, groesse: st.size, zeit: st.mtime.toISOString(), gesperrt: this.gesperrt(r), fehlt: false };
+      return { rel: r, name, groesse: st.size, zeit: st.mtime.toISOString(), gesperrt: this.gesperrt(r), fehlt: false,
+        vermerk: PRUEFBAR.test(name) ? null : await this.vermerkZustand(r, st.size) };
     } catch { return { rel: r, name, groesse: null, zeit: null, gesperrt: this.gesperrt(r), fehlt: true }; }
   }
 
@@ -245,8 +253,87 @@ export class Ablage {
    * @param {object} f geöffnete Datei aus oeffnen()
    * @param {string[]} verboten Teilpfade, die in der ZIP nicht vorkommen dürfen (je Projekt, z. B. „lokale-stimme/“)
    */
-  async oeffentlichPruefen(f, verboten = []) {
-    if (!PRUEFBAR.test(f.name)) throw new AblageFehler('Öffentlich kann nur eine ZIP sein – nur deren Inhalt lässt sich vorher prüfen', 400);
+  /** Prüfvermerk neben der Datei lesen (<rel>.pruefung.json) → {groesse, sha256, pruefungen} oder null. */
+  async vermerkLesen(rel) {
+    let fh;
+    try {
+      const r = this.rel(rel);
+      const soll = await this.abs(`${r}${VERMERK_ENDUNG}`);
+      fh = await fsp.open(soll, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+      const st = await fh.stat();
+      if (!st.isFile() || st.size > 64 * 1024 || st.nlink > 1) return null;
+      const b = Buffer.alloc(st.size);
+      await fh.read(b, 0, st.size, 0);
+      const d = JSON.parse(b.toString('utf8'));
+      // Pflicht: Prüfsumme, Größe, Dateiname = diese Datei, Bauwerkzeug genannt
+      if (!d || !/^[0-9a-f]{64}$/.test(String(d.sha256)) || !Number.isSafeInteger(d.groesse) || d.groesse <= 0) return null;
+      if (String(d.datei || '') !== path.posix.basename(r) || !String(d.werkzeug || '').trim()) return null;
+      return { groesse: d.groesse, sha256: d.sha256, werkzeug: String(d.werkzeug).slice(0, 200),
+        pruefungen: Array.isArray(d.pruefungen) ? d.pruefungen.slice(0, 10).map((x) => String(x).slice(0, 200)) : [] };
+    } catch { return null; } finally { if (fh) await fh.close().catch(() => {}); }
+  }
+
+  /** Für die Anzeige: 'ok' (Vermerk da, Größe passt), 'abweichend' (Vermerk passt nicht) oder null (keiner). */
+  async vermerkZustand(rel, groesse) {
+    const v = await this.vermerkLesen(rel);
+    return v ? (v.groesse === groesse ? 'ok' : 'abweichend') : null;
+  }
+
+  /** Nicht-ZIP vor dem Veröffentlichen: Vermerk muss da sein und Größe + SHA-256 (aus dem offenen Griff) stimmen. */
+  async vermerkPruefen(f) {
+    const v = await this.vermerkLesen(f.rel);
+    if (!v) throw new AblageFehler('Diese Datei lässt sich nicht prüfen und hat keinen Prüfvermerk des Bauskripts – nicht veröffentlicht', 400);
+    if (v.groesse !== f.groesse) throw new AblageFehler('Prüfvermerk passt nicht zur Datei (Größe) – die öffentliche Fassung neu bauen (Bauskript), nicht den Vermerk', 409);
+    const h = crypto.createHash('sha256');
+    for await (const teil of f.fh.createReadStream({ start: 0, end: f.groesse - 1, autoClose: false, highWaterMark: 1024 * 1024 })) h.update(teil);
+    if (h.digest('hex') !== v.sha256) throw new AblageFehler('Prüfvermerk passt nicht zur Datei (Prüfsumme) – die öffentliche Fassung neu bauen (Bauskript), nicht den Vermerk', 409);
+    return v;
+  }
+
+  /**
+   * ISO selbst prüfen (zusätzlich zum Vermerk – der beweist nur „unverändert“): alle Pfade (Schlüssel-Namen, je Projekt
+   * Verbotenes), eigene Teile (/fahnas, /nocloud, GRUB-Menüs) als Text und darin liegende .tar.gz-Archive (entpackt: Namen +
+   * Text). `textPruefer(rel, text)` liefert Funde (Texte) mit den privaten Regeln des GitHub-Spiegels.
+   */
+  async isoPruefen(f, { verboten = [], textPruefer = () => [] } = {}) {
+    const regeln = verboten.map((v) => nameNorm(v).trim().toLowerCase()).filter(Boolean);
+    const funde = [];
+    const dazu = (t) => { if (funde.length < 8) funde.push(t); };
+    const namePruefen = (n) => {
+      const g = inhaltGesperrt(n, { archiv: false });
+      if (g) return dazu(`${n} (${g})`);
+      const v = regeln.find((x) => nameNorm(n).toLowerCase().includes(x));
+      if (v) dazu(`${n} (für dieses Projekt verboten: ${v})`);
+    };
+    const textPruefen = (n, buf) => {
+      if (buf.length > 2 * 1024 * 1024 || buf.subarray(0, 8192).includes(0)) return;
+      for (const t of textPruefer(n, buf.toString('utf8'))) dazu(`${n} (${t})`);
+    };
+    const eintraege = await isoEintraege(f.fh, f.groesse);
+    for (const e of eintraege) {
+      namePruefen(e.pfad);
+      const eigen = /^(fahnas|nocloud)\//i.test(e.pfad) || /^boot\/grub\/[^/]+\.cfg$/i.test(e.pfad);
+      if (!eigen) continue;
+      if (/\.(tar\.gz|tgz)$/i.test(e.pfad)) {
+        if (e.groesse > 64 * 1024 * 1024) { dazu(`${e.pfad} (Archiv zu groß für die Prüfung)`); continue; }
+        let tar;
+        try { tar = zlib.gunzipSync(await isoLesen(f.fh, e), { maxOutputLength: 512 * 1024 * 1024 }); } catch { dazu(`${e.pfad} (Archiv nicht lesbar)`); continue; }
+        for (const t of tarEintraege(tar)) { namePruefen(`${e.pfad}:${t.name}`); if (t.daten) textPruefen(`${e.pfad}:${t.name}`, t.daten); }
+      } else if (e.groesse <= 2 * 1024 * 1024) textPruefen(e.pfad, await isoLesen(f.fh, e));
+    }
+    if (!eintraege.some((e) => /^fahnas\//i.test(e.pfad))) dazu('ISO ohne /fahnas – keine FAH-NAS-Installer-ISO?');
+    return funde;
+  }
+
+  async oeffentlichPruefen(f, verboten = [], { textPruefer } = {}) {
+    if (!PRUEFBAR.test(f.name)) {
+      await this.vermerkPruefen(f);
+      if (/\.iso$/i.test(f.name)) {
+        const funde = await this.isoPruefen(f, { verboten, textPruefer });
+        if (funde.length) throw new AblageFehler(`Nicht veröffentlicht – die ISO enthält: ${funde.join(' · ')}`, 409);
+      }
+      return;
+    }
     const regeln = verboten.map((v) => nameNorm(v).trim().toLowerCase()).filter(Boolean);
     const funde = [];
     for (const roh of await this.zipNamen(f.fh)) {
@@ -273,4 +360,76 @@ export function downloadKopf(name, groesse) {
   return { 'Content-Type': 'application/octet-stream', 'Content-Length': groesse,
     'Content-Disposition': `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}`,
     'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'; sandbox" };
+}
+
+// --- ISO 9660 (mit Rock-Ridge-Namen) und tar lesen – nur so viel, wie die Prüfung braucht ---------------------------
+const SEKTOR = 2048;
+async function lesenAb(fh, laenge, pos) {
+  const b = Buffer.alloc(laenge);
+  const { bytesRead } = await fh.read(b, 0, laenge, pos);
+  return b.subarray(0, bytesRead);
+}
+/** Dateien der ISO: [{pfad, lba, groesse}] (Ordner rekursiv, Rock-Ridge-Name wenn vorhanden, sonst ISO-Name ohne „;1“). */
+export async function isoEintraege(fh, groesse) {
+  const pvd = await lesenAb(fh, SEKTOR, 16 * SEKTOR);
+  if (pvd.length < 190 || pvd[0] !== 1 || pvd.toString('latin1', 1, 6) !== 'CD001') throw new AblageFehler('Keine gültige ISO-Datei', 409);
+  const aus = []; const besucht = new Set();
+  const datensatz = (b, o) => {
+    const len = b[o]; const nl = b[o + 32];
+    const lba = b.readUInt32LE(o + 2); const size = b.readUInt32LE(o + 10); const ordner = (b[o + 25] & 2) !== 0;
+    const roh = b.subarray(o + 33, o + 33 + nl);
+    let name = roh.length === 1 && (roh[0] === 0 || roh[0] === 1) ? null : roh.toString('latin1').replace(/;\d+$/, '').replace(/\.$/, '');
+    let su = o + 33 + nl + (nl % 2 === 0 ? 1 : 0); let rr = '';
+    while (su + 4 <= o + len) {                                            // Rock Ridge „NM“ (alternativer Name)
+      const sig = b.toString('latin1', su, su + 2); const l = b[su + 2];
+      if (l < 4 || su + l > o + len) break;
+      if (sig === 'NM') rr += b.toString('utf8', su + 5, su + l);
+      su += l;
+    }
+    if (name !== null && rr) name = rr;
+    return { len, lba, size, ordner, name };
+  };
+  async function ordnerLesen(lba, size, praefix, tiefe) {
+    if (tiefe > 30 || besucht.has(lba) || aus.length > 300000) return;
+    besucht.add(lba);
+    if (size > 64 * 1024 * 1024 || (lba + 0) * SEKTOR + size > groesse) throw new AblageFehler('ISO-Verzeichnis unplausibel', 409);
+    const b = await lesenAb(fh, size, lba * SEKTOR);
+    for (let o = 0; o < b.length;) {
+      if (b[o] === 0) { o = (Math.floor(o / SEKTOR) + 1) * SEKTOR; continue; }
+      if (o + 34 > b.length || o + b[o] > b.length) break;
+      const d = datensatz(b, o);
+      o += d.len;
+      if (d.name === null) continue;
+      const pfad = praefix ? `${praefix}/${d.name}` : d.name;
+      if (d.ordner) await ordnerLesen(d.lba, d.size, pfad, tiefe + 1);
+      else aus.push({ pfad, lba: d.lba, groesse: d.size });
+    }
+  }
+  const wurzel = datensatz(pvd, 156);
+  await ordnerLesen(wurzel.lba, wurzel.size, '', 0);
+  return aus;
+}
+export async function isoLesen(fh, e) { return lesenAb(fh, e.groesse, e.lba * SEKTOR); }
+
+/** tar-Einträge (ustar, GNU-Langnamen, pax-Pfade): [{name, daten?}] – Daten nur für Dateien bis 2 MB. */
+export function tarEintraege(buf) {
+  const aus = []; let lang = null; let pax = null;
+  for (let o = 0; o + 512 <= buf.length && aus.length < 200000;) {
+    const kopf = buf.subarray(o, o + 512);
+    if (kopf.every((x) => x === 0)) break;
+    const feld = (a, l) => kopf.toString('utf8', a, a + l).replace(/\0.*$/s, '');
+    const size = parseInt(feld(124, 12).trim() || '0', 8) || 0;
+    const typ = String.fromCharCode(kopf[156] || 48);
+    let name = feld(0, 100);
+    if (kopf.toString('latin1', 257, 262) === 'ustar') { const pre = feld(345, 155); if (pre) name = `${pre}/${name}`; }
+    const daten = buf.subarray(o + 512, o + 512 + size);
+    o += 512 + Math.ceil(size / 512) * 512;
+    if (typ === 'L') { lang = daten.toString('utf8').replace(/\0.*$/s, ''); continue; }
+    if (typ === 'x') { const m = /(?:^|\n)\d+ path=([^\n]*)\n/.exec(daten.toString('utf8')); pax = m ? m[1] : null; continue; }
+    if (typ === 'g') continue;
+    if (lang) { name = lang; lang = null; }
+    if (pax) { name = pax; pax = null; }
+    aus.push({ name: name.replace(/^\.\//, ''), daten: (typ === '0' || typ === '\0') && size <= 2 * 1024 * 1024 ? daten : null });
+  }
+  return aus;
 }

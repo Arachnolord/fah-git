@@ -491,7 +491,9 @@ function releasesAnsicht(p, admin) {
     h('td', { style: 'overflow-wrap:anywhere' }, h('div', {}, h('strong', {}, d.name),
       d.oeffentlich ? h('span', { class: 'marker gruen', style: 'margin-left:8px' }, sym('schild'), 'öffentlich') : null,
       d.gesperrt ? h('span', { class: 'marker rot', style: 'margin-left:8px', title: d.gesperrt }, sym('schloss'), 'gesperrt') : null,
-      d.fehlt ? h('span', { class: 'marker warn', style: 'margin-left:8px' }, sym('warnung'), 'nicht mehr in der Ablage') : null),
+      d.fehlt ? h('span', { class: 'marker warn', style: 'margin-left:8px' }, sym('warnung'), 'nicht mehr in der Ablage') : null,
+      d.vermerk === 'ok' ? h('span', { class: 'marker grau', style: 'margin-left:8px', title: 'Prüfvermerk des Bauskripts liegt daneben; vor dem Veröffentlichen prüft FAH-Git Prüfsumme und (bei ISOs) den Inhalt' }, sym('haken'), 'Prüfvermerk') : null,
+      d.vermerk === 'abweichend' ? h('span', { class: 'marker rot', style: 'margin-left:8px' }, sym('warnung'), 'Vermerk passt nicht') : null),
       d.rel ? h('div', { class: 'schwach klein mono' }, d.rel) : null),
     h('td', { class: 'schwach', style: 'white-space:nowrap' }, d.groesse != null ? groesse(d.groesse) : '–'),
     h('td', { class: 'schwach', style: 'white-space:nowrap' }, d.zeit ? datumZeit(d.zeit) : '–'),
@@ -525,12 +527,14 @@ async function releasesZuordnen(p) {
     leeren(auswahl);
     if (!gewaehlt.size) { auswahl.appendChild(h('div', { class: 'schwach klein' }, 'Noch nichts angekreuzt.')); return; }
     if (oeffentlich && !gewaehlt.has(oeffentlich)) oeffentlich = null;
-    auswahl.appendChild(h('div', { class: 'klein schwach', style: 'margin-bottom:4px' }, 'Zugeordnet – welche ZIP ist für GitHub (öffentlich)? Nur ZIPs lassen sich vorher prüfen.'));
+    auswahl.appendChild(h('div', { class: 'klein schwach', style: 'margin-bottom:4px' }, 'Zugeordnet – welche Datei ist für GitHub (öffentlich)? Möglich sind ZIPs (Inhalt wird geprüft) und Dateien mit Prüfvermerk des Bauskripts (z. B. eine Installer-ISO).'));
     for (const d of [{ rel: '', name: 'keine (nichts öffentlich)' }, ...gewaehlt.values()]) {
-      const zip = !d.rel || /\.(zip|apk|jar)$/i.test(d.rel);
+      const zip = !d.rel || /\.(zip|apk|jar)$/i.test(d.rel) || d.vermerk === 'ok';
       const radio = h('input', { type: 'radio', name: 'oeffentlich', disabled: !zip, checked: (oeffentlich || '') === d.rel, onchange: () => { oeffentlich = d.rel || null; } });
       auswahl.appendChild(h('label', { style: `display:flex;gap:8px;align-items:center;margin:3px 0;${zip ? '' : 'opacity:.6'}` }, radio, h('span', {}, d.name),
-        d.rel ? h('span', { class: 'schwach klein mono' }, d.rel) : null, zip ? null : h('span', { class: 'schwach klein' }, '(nur zum Herunterladen)')));
+        d.rel ? h('span', { class: 'schwach klein mono' }, d.rel) : null,
+        d.vermerk === 'ok' ? h('span', { class: 'marker gruen klein' }, sym('haken'), 'Prüfvermerk') : d.vermerk === 'abweichend' ? h('span', { class: 'marker rot klein' }, sym('warnung'), 'Vermerk passt nicht') : null,
+        zip ? null : h('span', { class: 'schwach klein' }, '(nur zum Herunterladen – kein Prüfvermerk)')));
     }
   }
   async function laden() {
