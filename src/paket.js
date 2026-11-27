@@ -98,7 +98,7 @@ export function ordnerPruefen(ordner, pub, erwartet) {
   if (art(path.join(ordner, 'manifest.txt'), 'f').size > 1024 * 1024 || art(path.join(ordner, 'signatur'), 'f').size > 1024) throw new Error('Manifest oder Signatur zu groß');
   const text = fs.readFileSync(path.join(ordner, 'manifest.txt'), 'utf8');
   const signatur = fs.readFileSync(path.join(ordner, 'signatur'), 'utf8').trim();
-  if (!signaturGueltig(pub, text, signatur)) throw new Error('Unterschrift des Pakets passt nicht zum gemerkten Schlüssel des Haupts');
+  if (!signaturGueltig(pub, text, signatur)) throw new Error('Unterschrift des Pakets passt nicht zum Release-Schlüssel der installierten Fassung');
   const m = manifestLesen(text);
   if (erwartet && m.version !== erwartet) throw new Error(`Paket hat Version ${m.version}, erwartet ${erwartet}`);
   const basis = path.join(ordner, 'dateien');

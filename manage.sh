@@ -8,9 +8,9 @@
 #   ./manage.sh start|stop|neustart|status|logs|url
 #   ./manage.sh auto-update     Nur Fail-over-Ersatz (ROLLE=ersatz): ein vom Haupt
 #                               bereitgelegtes, unterschriebenes Update prüfen und
-#                               einspielen. Startet alle 2 Minuten der Container
-#                               fah-git-updater („zeitplan“ richtet ihn ein, „update“
-#                               auf einem Ersatz macht das selbst).
+#                               einspielen. Startet alle 2 Minuten der Compose-Dienst
+#                               „updater“ (legt „update“ auf einem Ersatz mit an;
+#                               „zeitplan“ richtet nur ihn neu ein).
 #
 # Daten:  daten/ (Repos, Konten, Einstellungen) und .env fasst ein Update nie an.
 # Einrichten (erstes Konto, Import) geschieht in der Weboberfläche.
@@ -25,7 +25,11 @@ WARTEN_MAX_S=300
 
 info()   { printf '[fah-git] %s\n' "$*"; }
 fehler() { printf '[fah-git] FEHLER: %s\n' "$*" >&2; exit 1; }
-compose() { docker compose --ansi never "$@"; }
+# Auf dem Fail-over-Ersatz gehört der Dienst „updater“ dazu (Profil), mit dem Pfad dieses Ordners.
+compose() {
+  if [ -f "$ROOT/.env" ] && grep -qi '^ROLLE=ersatz' "$ROOT/.env"; then COMPOSE_PROFILES=ersatz FAHGIT_ROOT="$ROOT" docker compose --ansi never "$@"
+  else FAHGIT_ROOT="$ROOT" docker compose --ansi never "$@"; fi
+}
 
 port_frei() { [ -z "$(ss -ltnH "( sport = :$1 )" 2>/dev/null)" ]; }
 erster_freier_port() { local p=$1; while ! port_frei "$p"; do p=$((p + 1)); done; printf '%s' "$p"; }
@@ -84,7 +88,8 @@ bauen_und_starten() {
   mkdir -p daten
   chown 1000:1000 daten 2>/dev/null || true
   info "Baue das Abbild für FAH-Git $(version) …"
-  FAHGIT_VERSION="$(version)" compose build --quiet
+  FAHGIT_VERSION="$(version)" compose build --quiet fah-git
+  if ist_ersatz; then updater_abbild; altlast_updater; fi
   FAHGIT_VERSION="$(version)" compose up -d --remove-orphans
   warten_bis_bereit
 }
@@ -96,7 +101,8 @@ update() {
   zip="$(zip_waehlen "${1:-}")"
   if [ -n "$zip" ]; then zip_einspielen "$zip"; fi
   bauen_und_starten
-  if ist_ersatz; then zeitplan; fi
+  # Nach einem Update von Hand liegt diese ZIP vorn – ältere fah-git*.zip weg, damit ein „update“ ohne Pfad nie zurückstuft.
+  if [ -n "$zip" ]; then ls -t -- fah-git*.zip 2>/dev/null | tail -n +2 | while read -r z; do rm -f -- "$z"; done || true; fi
 }
 
 # --- Fail-over-Ersatz: Updates vom Haupt (1.15.0) ---------------------------------------------------------------
@@ -107,25 +113,28 @@ update() {
 
 ist_ersatz() { [ -f .env ] && grep -qi '^ROLLE=ersatz' .env; }
 
-# Updater (idempotent): kleiner Container, der alle 2 Minuten „manage.sh auto-update“ startet. Ein Container statt cron,
-# weil manche NAS (UGREEN) Nutzern keinen crontab erlauben – und er übersteht Neustarts und System-Updates. Ohne Netz;
-# er spricht nur mit Docker und sieht nur diesen App-Ordner (unter demselben Pfad, damit Docker-Pfade stimmen).
-UPDATER_NAME="fah-git-updater"
+# Updater-Abbild (Dienst „updater“ in docker-compose.yml, nur auf dem Ersatz): alpine + docker-cli, startet alle 2 Minuten
+# „manage.sh auto-update“. Ein Container statt cron, weil manche NAS (UGREEN) Nutzern keinen crontab erlauben – und er
+# übersteht Neustarts und System-Updates.
 UPDATER_DOCKERFILE='FROM alpine:3.20
 RUN apk add --no-cache bash docker-cli docker-cli-compose coreutils util-linux findutils
 ENTRYPOINT ["/bin/sh", "-c", "while true; do bash \"$FAHGIT_ROOT/manage.sh\" auto-update >>\"$FAHGIT_ROOT/auto-update.log\" 2>&1; sleep 120; done"]'
-zeitplan() {
-  local tag
-  tag="fah-git-updater:$(printf '%s' "$UPDATER_DOCKERFILE" | sha256sum | cut -c1-12)"
+updater_abbild() {
   : >>"$ROOT/.update.lock" 2>/dev/null || true
-  if ! docker image inspect "$tag" >/dev/null 2>&1; then
-    if ! printf '%s\n' "$UPDATER_DOCKERFILE" | docker build -q -t "$tag" - >/dev/null; then info "Updater-Abbild ließ sich nicht bauen – Updates vom Haupt bitte von Hand (./manage.sh auto-update)."; return 0; fi
+  printf '%s\n' "$UPDATER_DOCKERFILE" | docker build -q -t fah-git-updater:lokal - >/dev/null || fehler "Updater-Abbild ließ sich nicht bauen"
+}
+# Einzeln gestarteter Updater aus 1.15.0/1.15.1 (vor dem Compose-Dienst) weg.
+altlast_updater() {
+  if docker inspect fah-git-updater >/dev/null 2>&1 && [ -z "$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' fah-git-updater 2>/dev/null)" ]; then
+    docker rm -f fah-git-updater >/dev/null 2>&1 || true
   fi
-  if [ "$(docker inspect -f '{{.Config.Image}}' "$UPDATER_NAME" 2>/dev/null || true)" = "$tag" ] && [ "$(docker inspect -f '{{.State.Running}}' "$UPDATER_NAME" 2>/dev/null || true)" = true ]; then return 0; fi
-  docker rm -f "$UPDATER_NAME" >/dev/null 2>&1 || true
-  docker run -d --name "$UPDATER_NAME" --restart unless-stopped --network none --memory 256m \
-    -v /var/run/docker.sock:/var/run/docker.sock -v "$ROOT:$ROOT" -e FAHGIT_ROOT="$ROOT" -w "$ROOT" "$tag" >/dev/null
-  docker images fah-git-updater --format '{{.Tag}}' | grep -vx "${tag#*:}" | while read -r t; do docker image rm "fah-git-updater:$t" >/dev/null 2>&1 || true; done || true
+  docker images fah-git-updater --format '{{.Tag}}' | grep -vx lokal | while read -r t; do docker image rm "fah-git-updater:$t" >/dev/null 2>&1 || true; done || true
+}
+# Von Hand: Updater (neu) einrichten, ohne FAH-Git selbst anzufassen.
+zeitplan() {
+  ist_ersatz || fehler "Nur auf dem Fail-over-Ersatz (ROLLE=ersatz in der .env)"
+  updater_abbild; altlast_updater
+  compose up -d updater
   info "Updater läuft: Updates vom Haupt werden alle 2 Minuten geprüft und eingespielt (Log: auto-update.log)."
 }
 
@@ -190,12 +199,13 @@ einspielen_mit_rueckfall() {
   for d in manage.sh docker-compose.yml Dockerfile package.json README.md paket-manifest.txt paket-signatur; do
     if [ -f "$ROOT/$d" ]; then cp -p "$ROOT/$d" "$sicher/$d" || { rm -rf "$sicher"; return 1; }; fi
   done
-  if ordner_kopieren "$quelle" && FAHGIT_VERSION="$neu" compose up -d --remove-orphans && version_abwarten "$neu"; then
+  # Nur den Dienst fah-git anfassen – der Updater führt dieses Skript gerade selbst aus.
+  if ordner_kopieren "$quelle" && FAHGIT_VERSION="$neu" compose up -d --no-deps "$DIENST" && version_abwarten "$neu"; then
     rm -rf "$sicher"; return 0
   fi
   info "Neue Fassung $neu läuft nicht – zurück auf $alt."
   ordner_kopieren "$sicher" || true
-  FAHGIT_VERSION="$alt" compose up -d --remove-orphans || true
+  FAHGIT_VERSION="$alt" compose up -d --no-deps "$DIENST" || true
   version_abwarten "$alt" || true
   rm -rf "$sicher"
   return 1
@@ -239,6 +249,7 @@ auto_update() {
   info "Automatisches Update vom Haupt: $alt → $neu"
   if einspielen_mit_rueckfall "$stage/dateien" "$alt" "$neu"; then
     melden true "$neu" "Update von $alt auf $neu eingespielt"
+    ls -- "$ROOT"/fah-git*.zip >/dev/null 2>&1 && rm -f -- "$ROOT"/fah-git*.zip   # veraltete ZIPs nie wieder einspielen
     docker images fah-git --format '{{.Tag}}' | grep -vx -e "$neu" -e "$alt" -e lokal | while read -r t; do docker image rm "fah-git:$t" >/dev/null 2>&1 || true; done || true
   else
     [ -n "$hash" ] && printf '%s\n' "$hash" >>"$ROOT/.update-abgelehnt"

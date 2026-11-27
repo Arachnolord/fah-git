@@ -26,3 +26,20 @@ services:
     mem_limit: 512m
     labels:
       fahnas.webui: "http://{HOST}:${PORT:-3300}/"
+
+  # Fail-over-Selbstupdate (1.15.2): NUR auf dem Ersatz. Das Profil „ersatz“ schaltet manage.sh ein, wenn in der .env
+  # ROLLE=ersatz steht – auf dem Haupt (z. B. FAH-NAS) startet dieser Dienst nie. Er startet alle 2 Minuten
+  # „manage.sh auto-update“: ohne Netz, sieht nur Docker und diesen App-Ordner (unter demselben Pfad, damit die Pfade
+  # in Docker-Aufrufen stimmen). Das Abbild fah-git-updater:lokal baut manage.sh (alpine + docker-cli, nichts weiter).
+  updater:
+    image: fah-git-updater:lokal
+    profiles: ["ersatz"]
+    restart: unless-stopped
+    network_mode: none
+    mem_limit: 256m
+    environment:
+      FAHGIT_ROOT: ${FAHGIT_ROOT:-/fahgit-ordner-fehlt}
+    working_dir: ${FAHGIT_ROOT:-/fahgit-ordner-fehlt}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${FAHGIT_ROOT:-/fahgit-ordner-fehlt}:${FAHGIT_ROOT:-/fahgit-ordner-fehlt}

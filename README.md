@@ -84,7 +84,7 @@ Textdateien direkt im Browser bearbeiten – „Bearbeiten“, tippen, speichern
   dem Bau-Rechner unter `~/.config/fah-git/release-schluessel.pem`; der öffentliche steht in `src/release-schluessel.txt`).
   Der Haupt reicht nur dieses unterschriebene Release weiter (`paket-manifest.txt`, `paket-signatur` in der ZIP) und kann
   selbst nichts unterschreiben. Der Ersatz prüft es und legt es bereit; auf seinem Rechner prüft `./manage.sh auto-update`
-  (alle 2 Minuten vom Container `fah-git-updater` gestartet – ohne Netz, nur Docker und dieser App-Ordner; einrichten mit `./manage.sh zeitplan`, `update` macht das auf einem Ersatz selbst) noch einmal mit dem
+  (alle 2 Minuten vom Compose-Dienst `updater` gestartet – Profil `ersatz`, das manage.sh nur bei `ROLLE=ersatz` einschaltet, auf dem Haupt läuft er nie; ohne Netz, nur Docker und dieser App-Ordner; `./manage.sh update` baut und startet ihn mit, `./manage.sh zeitplan` richtet nur ihn neu ein) noch einmal mit dem
   Schlüssel und Prüfcode der installierten Fassung – in Wegwerf-Containern ohne Netz, auf einer Kopie, die der Container nicht
   erreicht. Nur neuere Versionen; das neue Abbild wird zuerst gebaut, startet die neue Fassung nicht, geht es auf die alte
   zurück. Abgelehnte Pakete werden nicht erneut versucht (`.update-abgelehnt`). Der Ersatz zeigt sich am Haupt mit seiner
