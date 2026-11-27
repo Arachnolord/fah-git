@@ -29,7 +29,8 @@ import { gitText, GIT_UMGEBUNG } from './git.js';
 import { recht, baumFiltern, LESEN, SCHREIBEN } from './rechte.js';
 import { BILD_MAX, artAusTyp, bildArt } from './profilbild.js';
 import { Ablage, versionAusZeit, downloadKopf, PRUEFBAR } from './ablage.js';
-import { pipeline } from 'node:stream';
+import { FailoverHaupt, FailoverErsatz, rolleLesen, verpacken, wiederErsatz, aufraeumen } from './failover.js';
+import { pipeline, Transform } from 'node:stream';
 
 const HIER = path.dirname(fileURLToPath(import.meta.url));
 const OEFFENTLICH = path.join(HIER, '..', 'public');
@@ -113,12 +114,23 @@ async function httpBackendDa() {
   return backendDa;
 }
 
-export function erstelleServer({ daten, oeffentlicheAdresse = '', github: githubOptionen = {}, ablage: ablageOrdner = process.env.FAHGIT_ABLAGE || '/ablage' }) {
+export function erstelleServer({ daten, oeffentlicheAdresse = '', github: githubOptionen = {}, ablage: ablageOrdner = process.env.FAHGIT_ABLAGE || '/ablage',
+  umgebung = process.env }) {
   const speicher = new Speicher(daten);
   const baum = new Baum(speicher);
+  // Fail-over (1.14.0): Haupt (Normalfall) oder Ersatz, der sich laufend vom Haupt abgleicht und selbst nichts ändert.
+  const rolle = rolleLesen(daten, umgebung);
+  // Reste eines abgebrochenen Abgleichs (halbe Neuzugänge, Sperrdateien) vor dem ersten git-Aufruf wegräumen.
+  if (rolle.vorgabe === 'ersatz') aufraeumen(speicher.repos);
+  const ersatz = rolle.rolle === 'ersatz' ? new FailoverErsatz({ speicher, baum, version: VERSION, env: umgebung }) : null;
+  const failoverHaupt = ersatz ? null : new FailoverHaupt({ speicher, version: VERSION });
+  const ERSATZ_ERLAUBT = new Set(['/anmelden', '/abmelden', '/failover/koppeln', '/failover/jetzt', '/failover/uebernehmen']);
   const konten = new Konten(speicher);
   const aktivitaet = new Aktivitaet(speicher);
-  const einstellungen = async () => ({ adresse: oeffentlicheAdresse, ziel_regeln: [], fahnas_adresse: '', sicherung: { auto: true, behalten: 14 }, ...(await speicher.lesen('einstellungen.json', {})) });
+  if (ersatz) konten.nurLesen = true;
+  const einstellungen = async () => ({ adresse: oeffentlicheAdresse, ziel_regeln: [], fahnas_adresse: '', sicherung: { auto: true, behalten: 14 }, ...(await speicher.lesen('einstellungen.json', {})),
+    // Der Ersatz zeigt Klon-Adressen auf sich selbst, nicht die des Haupts.
+    ...(ersatz ? { adresse: oeffentlicheAdresse } : {}) });
   const gh = new GitHub(githubOptionen);
   // Release-Ablage (1.12.0): fertige ZIPs/ISOs aus dem NAS-Ordner, nur lesend; je Projekt zugeordnet, eine davon „öffentlich“.
   const ablage = new Ablage(ablageOrdner);
@@ -135,6 +147,8 @@ export function erstelleServer({ daten, oeffentlicheAdresse = '', github: github
     githubInfo: async (r) => gh.repoInfo(await githubToken(), r) });
   const sicherung = new Sicherung({ speicher, baum, konten, einstellungen, version: VERSION });
   const auftraege = new Map();
+  // Release-Läufe (1.14.0): je Projekt der letzte Auftrag – die Oberfläche zeigt den Fortschritt auch nach dem Neuladen
+  const releaseLaeufe = new Map();
   // Hochladen aus der Oberfläche (25.10.2026): je Vorgang eine Sitzung, Dateien einzeln als Datenstrom, am Ende EIN Commit.
   const uploads = new Map();
   const HOCHLADEN = { dateiMax: 200 * 1024 * 1024, summeMax: 2 * 1024 * 1024 * 1024, anzahlMax: 5000, frist: 3600_000 };
@@ -162,11 +176,12 @@ export function erstelleServer({ daten, oeffentlicheAdresse = '', github: github
   }
 
   async function nurLesen(pfad) {
+    if (ersatz) return `Das ist der Fail-over von FAH-Git (nur lesen). Bitte zum Haupt pushen${ersatz.kopplung() ? `: ${ersatz.kopplung().haupt}` : ''}.`;
     const q = (await baum.projektMeta(pfad)).quelle;
     return q ? `Dieses Projekt ist eine laufende Kopie von ${q.url} und nur lesbar. Änderungen bitte dort pushen.` : null;
   }
 
-  const gitHttp = gitBearbeiter({ baum, konten, nachPush, nurLesen });
+  const gitHttp = gitBearbeiter({ baum, konten, nachPush, nurLesen, zusatzAnmeldung: failoverHaupt ? (n, g, quelle) => failoverHaupt.gitPruefen(n, g, quelle) : null });
 
   async function angemeldet(req) {
     const auth = String(req.headers.authorization || '');
@@ -218,7 +233,7 @@ export function erstelleServer({ daten, oeffentlicheAdresse = '', github: github
       }),
       quelle: meta.quelle ? { url: meta.quelle.url, ...(ich.admin ? { benutzer: meta.quelle.benutzer, hat_geheim: !!meta.quelle.geheim } : {}),
         takt: meta.quelle.takt, zuletzt: meta.quelle.zuletzt } : null,
-      releases: await releasesDaten(meta, ich),
+      releases: await releasesDaten({ ...meta, __pfad: pfad }, ich),
     };
   }
 
@@ -232,7 +247,9 @@ export function erstelleServer({ daten, oeffentlicheAdresse = '', github: github
       const i = await ablage.info(d).catch(() => ({ rel: d, name: path.posix.basename(d), fehlt: true }));
       return { nr, ...i, oeffentlich: r.oeffentlich === d, ...(ich.admin ? {} : { rel: undefined }) };
     }));
-    return { ablage: await ablage.da(), dateien, oeffentlich: ich.admin ? r.oeffentlich || null : !!r.oeffentlich, verboten: ich.admin ? r.verboten || [] : [] };
+    const lauf = ich.admin ? releaseLaeufe.get(meta.__pfad) : null;
+    return { ablage: await ablage.da(), dateien, oeffentlich: ich.admin ? r.oeffentlich || null : !!r.oeffentlich, verboten: ich.admin ? r.verboten || [] : [],
+      lauf: lauf && auftraege.has(lauf.id) ? lauf : null };
   }
 
   /**
@@ -273,9 +290,9 @@ export function erstelleServer({ daten, oeffentlicheAdresse = '', github: github
     const id = crypto.randomBytes(6).toString('hex');
     const a = { id, art, status: 'laeuft', meldungen: [], ergebnis: null, fehler: null, start: new Date().toISOString() };
     auftraege.set(id, a);
-    arbeit((t) => { a.meldungen.push(t); if (a.meldungen.length > 200) a.meldungen.shift(); })
+    arbeit((t) => { a.meldungen.push(t); if (a.meldungen.length > 200) a.meldungen.shift(); }, a)
       .then((e) => { a.status = 'fertig'; a.ergebnis = e; })
-      .catch((e) => { a.status = 'fehler'; a.fehler = e.message; })
+      .catch((e) => { a.status = 'fehler'; a.fehler = e.message; a.fehler_status = e.status || 500; })
       .finally(() => { a.ende = new Date().toISOString(); setTimeout(() => auftraege.delete(id), 3600_000).unref?.(); });
     return a;
   }
@@ -292,6 +309,30 @@ export function erstelleServer({ daten, oeffentlicheAdresse = '', github: github
       if (!bearer && req.headers['x-fahgit'] !== '1') throw new HttpFehler(403, 'Anfrage ohne Kennung der Oberfläche');
       const herkunft = req.headers.origin;
       if (herkunft && new URL(herkunft).host !== req.headers.host) throw new HttpFehler(403, 'Fremde Herkunft');
+      if (ersatz && !ERSATZ_ERLAUBT.has(weg)) {
+        const k = ersatz.kopplung();
+        throw new HttpFehler(423, `Das ist der Fail-over von FAH-Git (nur lesen). Änderungen bitte am Haupt${k ? ` (${k.haupt})` : ''}.`);
+      }
+    }
+
+    // Fail-over: Abfragen des Ersatzes beim Haupt – eigene Unterschrift statt Anmeldung, Antwort verschlüsselt.
+    if (weg === '/failover/stand' || weg === '/failover/dateien') {
+      if (m !== 'GET') throw new HttpFehler(405, 'Methode nicht erlaubt');
+      if (!failoverHaupt) throw new HttpFehler(404, 'Diese Instanz ist selbst ein Ersatz');
+      const { schluessel, einmal } = await failoverHaupt.pruefen(req, absender(req));
+      const wert = weg === '/failover/stand' ? { ...(await failoverHaupt.stand()), git: failoverHaupt.gitZugang(absender(req)) } : await failoverHaupt.dateien();
+      return json(res, 200, verpacken(schluessel, einmal, wert), { 'Cache-Control': 'no-store' });
+    }
+    if (weg === '/failover/koppeln' && m === 'POST') {
+      if (!ersatz) throw new HttpFehler(404, 'Nur auf einer Fail-over-Instanz (FAHGIT_ROLLE=ersatz)');
+      // Solange es keine Konten gibt (frische Instanz), darf jeder im Netz koppeln – wie bei der Ersteinrichtung.
+      if (!(await konten.ersteinrichtungNoetig())) {
+        const n = await angemeldet(req);
+        if (!n) throw new HttpFehler(401, 'Bitte anmelden');
+        if (!n.admin || n.leseSchluessel) throw new HttpFehler(403, 'Nur für Administratoren');
+      }
+      const b = await koerper(req);
+      return json(res, 200, await ersatz.koppeln(b.haupt, b.code));
     }
 
     if (weg === '/gesundheit') {
@@ -301,7 +342,13 @@ export function erstelleServer({ daten, oeffentlicheAdresse = '', github: github
     if (weg === '/status' && m === 'GET') {
       const nutzer = await angemeldet(req);
       // FAH-NAS-Adresse (nur sie) brauchen alle Angemeldeten für den Knopf „Auf FAH-NAS bauen“.
-      return json(res, 200, { version: VERSION, ersteinrichtung: await konten.ersteinrichtungNoetig(), nutzer,
+      const leer = await konten.ersteinrichtungNoetig();
+      const fo = ersatz ? (() => {
+        const st = ersatz.status();
+        // Ohne Konten (erster Abgleich läuft) zeigt die Startseite den Fortschritt; sonst nur Rolle und Kopplung.
+        return { rolle: 'ersatz', gekoppelt: st.gekoppelt, ...(leer || nutzer ? { haupt: st.haupt, gesamt: st.gesamt, fertig: st.fertig, fehler: st.fehler, zuletzt: st.zuletzt } : {}) };
+      })() : { rolle: 'haupt', uebernommen: rolle.uebernommen };
+      return json(res, 200, { version: VERSION, ersteinrichtung: leer, nutzer, failover: fo,
         ...(nutzer ? { fahnas: (await einstellungen()).fahnas_adresse || '' } : {}) });
     }
     if (weg === '/ersteinrichtung' && m === 'POST') {
@@ -323,6 +370,9 @@ export function erstelleServer({ daten, oeffentlicheAdresse = '', github: github
       throw new HttpFehler(403, 'Dieser Zugangsschlüssel darf nur lesen (klonen, holen, abfragen). Zum Ändern einen Schlüssel „Lesen und schreiben“ verwenden.');
     }
     const nurAdmin = () => { if (!ich.admin) throw new HttpFehler(403, 'Nur für Administratoren'); };
+    if (ersatz && (weg === '/sicherung' || weg.startsWith('/sicherung/'))) throw new HttpFehler(423, 'Der Fail-over sichert nicht – Sicherungen gibt es am Haupt.');
+    // Fehlerliste des Ersatzes nennt Projektpfade – nur Admins sehen sie, alle anderen nur die Anzahl.
+    const ersatzStatus = () => { const st = ersatz.status(); return ich.admin && !ich.leseSchluessel ? st : { ...st, repoFehler: st.repoFehler.map(() => ({ pfad: '', fehler: '' })) }; };
     // Rechte je Pfad: nicht freigegeben → 404 wie „gibt es nicht“, nur lesbar → 403.
     const darfLesen = (pfad, text = 'Nicht gefunden') => { if (recht(ich, pfad) < LESEN) throw new HttpFehler(404, text); };
     const darfSchreiben = (pfad, text = 'Nicht gefunden') => {
@@ -360,7 +410,9 @@ export function erstelleServer({ daten, oeffentlicheAdresse = '', github: github
       return json(res, 200, { projekte, ordner, nutzer: ich.admin ? (await konten.liste()).length : null, spiegel: spiegelListe, zuletzt,
         aktivitaet: await aktivitaetFuer(await aktivitaet.liste({ anzahl: ich.admin ? 25 : 200 }), 25),
         frei: platz ? platz.bavail * platz.bsize : null, version: VERSION,
-        ...(ich.admin ? { sicherung: await sicherung.kurz().catch(() => null), github: await (async () => {
+        failover: ersatz ? ersatzStatus() : ich.admin ? await failoverHaupt.status().then((f) => (f.eingerichtet || rolle.uebernommen ? { ...f, uebernommen: rolle.uebernommen } : null)).catch(() => null) : null,
+        // Der Ersatz sichert nicht und spiegelt nicht – dort keine Kacheln dafür.
+        ...(ich.admin && !ersatz ? { sicherung: await sicherung.kurz().catch(() => null), github: await (async () => {
           const g = (await einstellungen()).github;
           const anzahl = Object.values(meta.projekte).filter((p) => (p.spiegel || []).some((s) => s.art === 'github')).length;
           return { eingerichtet: !!(g && g.geheim), konto: g ? g.konto : null, anzahl };
@@ -823,33 +875,51 @@ export function erstelleServer({ daten, oeffentlicheAdresse = '', github: github
       return json(res, 200, await releaseVeroeffentlichen(pfad, s, { tag, titel: q.titel, text: q.text, datei, strom: req, groesse, ich }));
     }
     if (weg === '/github/release-ablage' && m === 'POST') {
-      // 1.12.0: die als „öffentlich“ gewählte Datei aus der Ablage veröffentlichen – ohne Hochladen. Vorher ZIP-Inhalt prüfen.
+      // 1.12.0: die als „öffentlich“ gewählte Datei aus der Ablage veröffentlichen – ohne Hochladen. 1.14.0: als Auftrag im
+      // Hintergrund mit Fortschritt (Prüfen, Hochladen), Antwort sofort mit der Auftragsnummer (GET /api/auftrag?id=…).
       const b = await koerper(req); const pfad = await projektPfad(b.pfad);
       const s = await releaseSpiegel(pfad, b.id);
       const r = (await baum.projektMeta(pfad)).releases || {};
       if (!r.oeffentlich) throw new HttpFehler(400, 'Noch keine Datei als „öffentlich“ gewählt (Reiter Releases)');
-      // EIN Griff auf die Datei: geprüft und hochgeladen wird genau dasselbe, auch wenn die Ablage sich dazwischen ändert
-      const f = await ablage.oeffnen(r.oeffentlich);
-      let strom = null;
-      try {
-        // Private Regeln des GitHub-Spiegels auch auf die Inhalte einer ISO anwenden (Begriffe selbst nie ausgeben)
-        const bg = await bereinigungLesen();
-        const verbotenAlle = [...new Set([...(bg.verboten || []), ...ersetzenVorbereiten(bg.ersetzen || []).filter((x) => x.klartext && x.klartext.trim().length >= 4).map((x) => x.klartext.trim())])];
-        const textPruefer = (rel, text) => textPruefen(text, rel, verbotenAlle).filter((x) => ['privat', 'schluessel', 'token'].includes(x.art))
-          .map((x) => `${x.art === 'privat' ? 'privater Begriff laut Bereinigung' : x.text}, Zeile ${x.zeile}`);
-        await ablage.oeffentlichPruefen(f, r.verboten || [], { textPruefer });
-        const vorher = await f.fh.stat();
-        if (f.groesse > 2 * 1024 * 1024 * 1024 - 1) throw new HttpFehler(413, 'GitHub nimmt je Release-Datei höchstens 2 GB');
-        if (!/^[A-Za-z0-9][A-Za-z0-9 ._()-]{0,150}$/.test(f.name)) throw new HttpFehler(400, 'Dateiname: Buchstaben, Ziffern, Leerzeichen, Punkt, Minus, Klammern');
-        const tag = String(b.version || '').trim() || versionAusZeit(f.zeit);
-        if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,60}$/.test(tag)) throw new HttpFehler(400, 'Version: Buchstaben, Ziffern, Punkt, Minus (z. B. 2026.11.20 oder v1.2.0)');
-        strom = f.fh.createReadStream({ start: 0, end: f.groesse - 1, autoClose: false, highWaterMark: 1024 * 1024 });
-        const nachDemHochladen = async () => {
-          const n = await f.fh.stat();
-          if (n.size !== vorher.size || n.mtimeMs !== vorher.mtimeMs || n.ctimeMs !== vorher.ctimeMs) throw new HttpFehler(409, 'Die Datei wurde während des Hochladens verändert – Release zurückgenommen');
-        };
-        return json(res, 200, await releaseVeroeffentlichen(pfad, s, { tag, titel: b.titel, text: b.text, datei: f.name, strom, groesse: f.groesse, ich, quelle: r.oeffentlich, nachDemHochladen }));
-      } finally { if (strom) strom.destroy(); await f.fh.close().catch(() => {}); }
+      const wunsch = String(b.version || '').trim();
+      if (wunsch && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,60}$/.test(wunsch)) throw new HttpFehler(400, 'Version: Buchstaben, Ziffern, Punkt, Minus (z. B. 2026.11.20 oder v1.2.0)');
+      const alt = releaseLaeufe.get(pfad);
+      if (alt && alt.status === 'laeuft' && auftraege.has(alt.id)) throw new HttpFehler(409, 'Für dieses Projekt läuft schon eine Veröffentlichung');
+      const a = auftragStarten('release', async (melde, a) => {
+        a.projekt = pfad; a.spiegel = s.id; a.repo = s.repo; a.datei = path.posix.basename(r.oeffentlich);
+        a.fortschritt = { phase: 'pruefen', erledigt: 0, gesamt: 0, seit: Date.now() };
+        // EIN Griff auf die Datei: geprüft und hochgeladen wird genau dasselbe, auch wenn die Ablage sich dazwischen ändert
+        const f = await ablage.oeffnen(r.oeffentlich);
+        let strom = null;
+        try {
+          a.fortschritt.gesamt = f.groesse;
+          // Private Regeln des GitHub-Spiegels auch auf die Inhalte einer ISO anwenden (Begriffe selbst nie ausgeben)
+          const bg = await bereinigungLesen();
+          const verbotenAlle = [...new Set([...(bg.verboten || []), ...ersetzenVorbereiten(bg.ersetzen || []).filter((x) => x.klartext && x.klartext.trim().length >= 4).map((x) => x.klartext.trim())])];
+          const textPruefer = (rel, text) => textPruefen(text, rel, verbotenAlle).filter((x) => ['privat', 'schluessel', 'token'].includes(x.art))
+            .map((x) => `${x.art === 'privat' ? 'privater Begriff laut Bereinigung' : x.text}, Zeile ${x.zeile}`);
+          await ablage.oeffentlichPruefen(f, r.verboten || [], { textPruefer, fortschritt: (n) => { a.fortschritt.erledigt = n; } });
+          const vorher = await f.fh.stat();
+          if (f.groesse > 2 * 1024 * 1024 * 1024 - 1) throw new HttpFehler(413, 'GitHub nimmt je Release-Datei höchstens 2 GB');
+          if (!/^[A-Za-z0-9][A-Za-z0-9 ._()-]{0,150}$/.test(f.name)) throw new HttpFehler(400, 'Dateiname: Buchstaben, Ziffern, Leerzeichen, Punkt, Minus, Klammern');
+          const tag = wunsch || versionAusZeit(f.zeit);
+          a.version = tag;
+          a.fortschritt = { phase: 'hochladen', erledigt: 0, gesamt: f.groesse, seit: Date.now() };
+          strom = f.fh.createReadStream({ start: 0, end: f.groesse - 1, autoClose: false, highWaterMark: 1024 * 1024 });
+          const zaehler = new Transform({ transform(teil, _k, weiter) { a.fortschritt.erledigt += teil.length; weiter(null, teil); } });
+          pipeline(strom, zaehler, () => {});
+          const nachDemHochladen = async () => {
+            a.fortschritt.phase = 'abschluss';
+            const n = await f.fh.stat();
+            if (n.size !== vorher.size || n.mtimeMs !== vorher.mtimeMs || n.ctimeMs !== vorher.ctimeMs) throw new HttpFehler(409, 'Die Datei wurde während des Hochladens verändert – Release zurückgenommen');
+          };
+          const e = await releaseVeroeffentlichen(pfad, s, { tag, titel: b.titel, text: b.text, datei: f.name, strom: zaehler, groesse: f.groesse, ich, quelle: r.oeffentlich, nachDemHochladen });
+          a.fortschritt.phase = 'fertig';
+          return e;
+        } finally { if (strom) strom.destroy(); await f.fh.close().catch(() => {}); }
+      });
+      releaseLaeufe.set(pfad, a);
+      return json(res, 202, { auftrag: a.id });
     }
     if (weg === '/github/sichtbarkeit' && m === 'POST') {
       // Öffentlich nur für bereinigte Spiegel, die schon sauber übertragen haben; zurück auf privat geht immer.
@@ -868,10 +938,48 @@ export function erstelleServer({ daten, oeffentlicheAdresse = '', github: github
       return json(res, 200, { sichtbarkeit: wert });
     }
 
+    // --- Fail-over (1.14.0) ---
+    if (weg === '/failover/status' && m === 'GET') {
+      if (ersatz) return json(res, 200, ersatzStatus());
+      nurAdmin();
+      return json(res, 200, { ...(await failoverHaupt.status()), uebernommen: rolle.uebernommen, seit: rolle.seit });
+    }
+    if (weg === '/failover/code' && (m === 'POST' || m === 'DELETE')) {
+      nurAdmin();
+      if (!failoverHaupt) throw new HttpFehler(404, 'Nur am Haupt');
+      if (m === 'DELETE') { await failoverHaupt.loesen(); aktivitaet.melden({ art: 'failover', nutzer: ich.name, anzeige: ich.anzeige, text: 'Fail-over-Kopplung gelöst' }); return json(res, 200, { ok: true }); }
+      const r = await failoverHaupt.codeErzeugen();
+      aktivitaet.melden({ art: 'failover', nutzer: ich.name, anzeige: ich.anzeige, text: 'Fail-over-Kopplungscode erzeugt' });
+      return json(res, 200, r, { 'Cache-Control': 'no-store' });
+    }
+    if (weg === '/failover/jetzt' && m === 'POST') {
+      if (!ersatz) throw new HttpFehler(404, 'Nur auf der Fail-over-Instanz');
+      ersatz.anstossen();
+      return json(res, 200, { ok: true });
+    }
+    if (weg === '/failover/uebernehmen' && m === 'POST') {
+      nurAdmin();
+      if (!ersatz) throw new HttpFehler(404, 'Nur auf der Fail-over-Instanz');
+      if ((await koerper(req)).bestaetigt !== true) throw new HttpFehler(400, 'Bitte ausdrücklich bestätigen');
+      await ersatz.anhalten();
+      try { await ersatz.uebernehmen(ich.name); } catch (e) { ersatz.starten(); throw e; }
+      res.on('finish', () => setTimeout(() => process.exit(0), 1000).unref?.());
+      return json(res, 200, { ok: true, neustart: true });
+    }
+    if (weg === '/failover/zurueck' && m === 'POST') {
+      nurAdmin();
+      if (!rolle.uebernommen) throw new HttpFehler(404, 'Nur auf einem Ersatz, der übernommen hat');
+      if ((await koerper(req)).bestaetigt !== true) throw new HttpFehler(400, 'Bitte ausdrücklich bestätigen');
+      await wiederErsatz(daten);
+      res.on('finish', () => setTimeout(() => process.exit(0), 1000).unref?.());
+      return json(res, 200, { ok: true, neustart: true });
+    }
+
     if (weg === '/einstellungen' && m === 'GET') {
       nurAdmin();
       const e = await einstellungen();
-      return json(res, 200, { ...e, github: e.github ? { konto: e.github.konto, eingerichtet: !!e.github.geheim, geprueft: e.github.geprueft } : null });
+      return json(res, 200, { ...e, github: e.github ? { konto: e.github.konto, eingerichtet: !!e.github.geheim, geprueft: e.github.geprueft } : null,
+        failover: e.failover ? { anfang: e.failover.anfang, erstellt: e.failover.erstellt } : null });
     }
     if (weg === '/einstellungen' && m === 'PUT') {
       nurAdmin(); const b = await koerper(req);
@@ -958,15 +1066,16 @@ export function erstelleServer({ daten, oeffentlicheAdresse = '', github: github
   });
   server.requestTimeout = 0; // große Pushes dürfen dauern
   server.headersTimeout = 60_000;
-  return { server, speicher, baum, konten, spiegel, aktivitaet, sicherung };
+  return { server, speicher, baum, konten, spiegel, aktivitaet, sicherung, ersatz, failoverHaupt, rolle };
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
   const port = Number(process.env.PORT || 3300);
-  const { server, spiegel, sicherung } = erstelleServer({ daten: process.env.FAHGIT_DATEN || '/daten', oeffentlicheAdresse: process.env.FAHGIT_ADRESSE || '' });
-  spiegel.starten();
-  sicherung.starten();
-  server.listen(port, () => console.log(`FAH-Git ${VERSION} hört auf Port ${port}`));
-  const ende = () => { spiegel.stoppen(); sicherung.stoppen(); server.close(() => process.exit(0)); setTimeout(() => process.exit(0), 5000).unref(); };
+  const { server, spiegel, sicherung, ersatz } = erstelleServer({ daten: process.env.FAHGIT_DATEN || '/daten', oeffentlicheAdresse: process.env.FAHGIT_ADRESSE || '' });
+  // Der Ersatz leitet nichts weiter und sichert nicht (sonst doppelte Pushes und Sicherungen in dasselbe NAS-Ziel).
+  if (ersatz) ersatz.starten();
+  else { spiegel.starten(); sicherung.starten(); }
+  server.listen(port, () => console.log(`FAH-Git ${VERSION} hört auf Port ${port}${ersatz ? ' (Fail-over, nur lesen)' : ''}`));
+  const ende = () => { spiegel.stoppen(); sicherung.stoppen(); ersatz?.stoppen(); server.close(() => process.exit(0)); setTimeout(() => process.exit(0), 5000).unref(); };
   process.on('SIGTERM', ende); process.on('SIGINT', ende);
 }

@@ -19,7 +19,7 @@ export async function projektSeite(r, ctx) {
   if (p.pfad !== r.pfad) { location.replace(projektUrl(p.pfad)); return h('div'); }
   const ref = r.params.ref || p.standard;
   const ansicht = r.ansicht;
-  const admin = !!ctx.zustand.ich.admin;
+  const admin = !!ctx.zustand.ich.admin && ctx.zustand.failover?.rolle !== 'ersatz';
   const schreiben = darfSchreiben(p.pfad);
   const reiterAktiv = { dateien: 'dateien', datei: 'dateien', verlauf: 'verlauf', commit: 'verlauf', zweige: 'zweige', spiegel: 'spiegel', releases: 'releases', einstellungen: 'einstellungen', aktivitaet: 'aktivitaet' }[ansicht] || 'dateien';
   let inhaltEl;
@@ -351,22 +351,37 @@ async function releaseHochladen(p, s) {
   const titel = h('input', { type: 'text', placeholder: `${p.name} – Version …` });
   const text = h('textarea', { rows: 3, placeholder: 'Was ist neu? (optional)' });
   const datei = h('input', { type: 'file', required: true });
+  const standBalken = h('progress', { max: 1000, value: 0, style: 'width:100%;height:10px' });
+  const standText = h('div', { class: 'klein', style: 'margin-top:4px' }, 'Hochladen beginnt …');
+  const stand = h('div', { hidden: true, style: 'margin-top:8px' }, standBalken, standText);
   const r = await dialog(`Release für GitHub ${s.repo}`, h('div', {},
     h('div', { class: 'hinweisbox warn' }, sym('warnung'), h('div', {}, 'Die Datei geht so, wie sie ist, nach GitHub – sie wird NICHT bereinigt oder geprüft. Nur fertige Release-Dateien ohne persönliche Daten hochladen (z. B. die verteilbare App als ZIP).')),
     feld('Version', version, 'Wird als Tag auf GitHub angelegt (z. B. 2026.11.20 oder v1.2.0). Jede Version nur einmal.'),
     feld('Titel', titel, 'Leer = die Version.'),
     feld('Beschreibung', text, 'Steht auf der Release-Seite (optional).'),
     feld('Datei', datei, 'Bis 2 GB. Die Datei erscheint auf GitHub unter „Releases“ zum Herunterladen.'),
-    info('Danach bleibt auf GitHub nur dieses neueste Release: ältere Releases und ihre Tags löscht FAH-Git nach dem Hochladen.')),
+    info('Danach bleibt auf GitHub nur dieses neueste Release: ältere Releases und ihre Tags löscht FAH-Git nach dem Hochladen.'), stand),
   [{ text: 'Abbrechen' }, { text: 'Hochladen', art: 'haupt', aktion: async () => {
     const f = datei.files && datei.files[0];
     if (!f) throw new Error('Bitte eine Datei wählen');
-    meldung(`Lade ${f.name} hoch …`);
-    const antwort = await fetch(`/api/github/release?${q({ pfad: p.pfad, id: s.id, version: version.value.trim(), titel: titel.value.trim(), text: text.value.trim(), datei: f.name })}`,
-      { method: 'PUT', body: f, headers: { 'X-FAHGIT': '1', 'Content-Type': 'application/octet-stream' } });
-    const d = await antwort.json().catch(() => ({}));
-    if (!antwort.ok) throw new Error(d.fehler || `Fehler ${antwort.status}`);
-    return d;
+    // 1.14.0: mit Fortschritt (XHR meldet die hochgeladenen Bytes)
+    stand.hidden = false;
+    const seit = Date.now();
+    return new Promise((fertig, fehler) => {
+      const x = new XMLHttpRequest();
+      x.open('PUT', `/api/github/release?${q({ pfad: p.pfad, id: s.id, version: version.value.trim(), titel: titel.value.trim(), text: text.value.trim(), datei: f.name })}`);
+      x.setRequestHeader('X-FAHGIT', '1'); x.setRequestHeader('Content-Type', 'application/octet-stream');
+      x.upload.onprogress = (e) => {
+        if (!e.lengthComputable) return;
+        const sek = (Date.now() - seit) / 1000; const rate = sek > 1 ? e.loaded / sek : 0;
+        standBalken.value = Math.round((e.loaded / e.total) * 1000);
+        standText.textContent = e.loaded >= e.total ? `${f.name} ist oben – GitHub legt das Release an …`
+          : `${Math.floor((e.loaded / e.total) * 100)} % · ${mb(e.loaded)} von ${mb(e.total)}${rate ? ` · ${mb(rate)}/s · noch etwa ${dauerText((e.total - e.loaded) / rate)}` : ''}`;
+      };
+      x.onload = () => { let d = {}; try { d = JSON.parse(x.responseText || '{}'); } catch { /* leer */ } if (x.status >= 200 && x.status < 300) fertig(d); else fehler(new Error(d.fehler || `Fehler ${x.status}`)); };
+      x.onerror = () => fehler(new Error('Hochladen abgebrochen – Netz prüfen'));
+      x.send(f);
+    });
   } }]);
   if (r) {
     const e = r.entfernt || {};
@@ -484,6 +499,52 @@ async function githubAendern(p, s) {
 // „öffentlich“ und geht per Knopf als GitHub-Release raus – ohne erneutes Hochladen.
 const releaseSpiegel = (p) => p.spiegel.filter((s) => s.art === 'github' && oeffentlichMod(s) && s.zuletzt && s.zuletzt.ergebnis === 'ok');
 
+const mb = (n) => `${(n / 1048576).toLocaleString('de-DE', { maximumFractionDigits: n < 10 * 1048576 ? 1 : 0 })} MB`;
+const dauerText = (s) => (s >= 3600 ? `${Math.floor(s / 3600)} h ${Math.round((s % 3600) / 60)} min` : s >= 90 ? `${Math.round(s / 60)} min` : `${Math.max(1, Math.round(s))} s`);
+
+/**
+ * Fortschritt einer Veröffentlichung (1.14.0): Balken + Text, fragt jede Sekunde nach, solange der Auftrag läuft und das
+ * Element auf der Seite ist. Bleibt auch nach dem Neuladen sichtbar (der Server merkt sich den letzten Lauf je Projekt).
+ */
+function releaseFortschritt(lauf, { klein = false } = {}) {
+  const balken = h('progress', { max: 1000, value: 0, style: 'width:100%;height:10px' });
+  const text = h('div', { class: klein ? 'klein' : '', style: 'margin-top:4px' });
+  const kasten = h('div', { class: klein ? '' : 'hinweisbox', style: klein ? 'margin-top:6px' : 'display:block;margin-top:8px' }, balken, text);
+  let zuletzt = null;
+  function zeichnen(a) {
+    const f = a.fortschritt || {};
+    const anteil = f.gesamt ? Math.min(1, (f.erledigt || 0) / f.gesamt) : 0;
+    balken.value = Math.round(anteil * 1000);
+    const sek = f.seit ? (Date.now() - f.seit) / 1000 : 0;
+    const rate = sek > 1 ? (f.erledigt || 0) / sek : 0;
+    const rest = rate > 0 && f.gesamt ? (f.gesamt - (f.erledigt || 0)) / rate : null;
+    const pz = `${Math.floor(anteil * 100)} %`;
+    if (a.status === 'fehler') { balken.hidden = true; text.textContent = `Nicht veröffentlicht: ${a.fehler}`; text.style.color = 'var(--gefahr)'; return; }
+    if (a.status === 'fertig') {
+      balken.value = 1000;
+      leeren(text);
+      text.append(`Veröffentlicht: ${a.datei} als ${a.version || ''} – `, a.ergebnis && a.ergebnis.url ? h('a', { href: a.ergebnis.url, target: '_blank', rel: 'noopener noreferrer' }, 'auf GitHub ansehen') : '');
+      return;
+    }
+    text.textContent = f.phase === 'hochladen'
+      ? `Lade ${a.datei} zu GitHub ${a.repo || ''} … ${pz} · ${mb(f.erledigt || 0)} von ${mb(f.gesamt || 0)}${rate ? ` · ${mb(rate)}/s` : ''}${rest !== null ? ` · noch etwa ${dauerText(rest)}` : ''}`
+      : f.phase === 'abschluss' ? `${a.datei} ist oben – schließe ab (ältere Releases aufräumen) …`
+      : `Prüfe ${a.datei || 'Datei'} (Prüfsumme und Inhalt) …${f.erledigt ? ` ${pz}` : ''}`;
+  }
+  async function fragen() {
+    if (!kasten.isConnected && zuletzt) return;
+    try {
+      const a = await api('GET', `/auftrag?${q({ id: lauf.id })}`);
+      zuletzt = a; zeichnen(a);
+      if (a.status === 'laeuft') setTimeout(fragen, 1000);
+      else if (a.status === 'fertig') meldung('Release veröffentlicht');
+    } catch { text.textContent = 'Fortschritt nicht abrufbar (FAH-Git neu gestartet?) – Seite neu laden.'; }
+  }
+  zeichnen(lauf);
+  if (lauf.status === 'laeuft') setTimeout(fragen, 300);
+  return kasten;
+}
+
 function releasesAnsicht(p, admin) {
   const r = p.releases;
   const ziele = releaseSpiegel(p);
@@ -509,7 +570,8 @@ function releasesAnsicht(p, admin) {
         info('Fertige Dateien (ZIP, ISO, PDF …) aus der Release-Ablage auf dem NAS – FAH-Git liest sie nur und lädt nichts hoch. Die als „öffentlich“ gewählte Datei geht mit einem Klick als Release zu GitHub; dort bleibt nur das neueste.'),
         !r.ablage ? h('div', { class: 'hinweisbox warn', style: 'margin-top:8px' }, sym('warnung'), h('div', {}, 'Die Release-Ablage ist nicht eingebunden (in der .env von FAH-Git: ABLAGE=<Ordner auf dem NAS>).')) : null,
         r.verboten.length ? h('p', { class: 'klein' }, 'Darf nicht in der öffentlichen Datei stecken: ', r.verboten.map((v) => h('code', { style: 'margin-right:6px' }, v))) : null,
-        admin && r.oeffentlich && !ziele.length ? h('p', { class: 'klein schwach' }, 'Zum Veröffentlichen braucht das Projekt eine GitHub-Weiterleitung „Öffentlicher Stand“, die schon einmal sauber übertragen hat (Reiter Spiegel).') : null),
+        admin && r.oeffentlich && !ziele.length ? h('p', { class: 'klein schwach' }, 'Zum Veröffentlichen braucht das Projekt eine GitHub-Weiterleitung „Öffentlicher Stand“, die schon einmal sauber übertragen hat (Reiter Spiegel).') : null,
+        admin && r.lauf ? releaseFortschritt(r.lauf) : null),
       r.dateien.length ? h('table', { class: 'tabelle' }, h('tr', {}, h('th', {}, 'Datei'), h('th', {}, 'Größe'), h('th', {}, 'Stand'), h('th', {})), r.dateien.map(zeile))
         : h('div', { class: 'leer-hinweis' }, admin ? 'Noch keine Dateien zugeordnet – „Dateien zuordnen …“ wählt sie aus der Ablage.' : 'Keine Release-Dateien.')));
 }
@@ -573,21 +635,16 @@ async function releaseAusAblage(p, s) {
   const text = h('textarea', { rows: 3, placeholder: 'Was ist neu? (optional)' });
   const r = await dialog(`Release für GitHub ${s.repo}`, h('div', {},
     h('p', { style: 'margin-top:0' }, 'Datei: ', h('strong', {}, d.name), h('span', { class: 'schwach' }, ` · ${d.groesse != null ? groesse(d.groesse) : '?'} · Stand ${d.zeit ? datumZeit(d.zeit) : '?'}`)),
-    h('div', { class: 'hinweisbox warn' }, sym('warnung'), h('div', {}, 'Die Datei geht so, wie sie ist, öffentlich nach GitHub. FAH-Git prüft vorher das Inhaltsverzeichnis der ZIP auf Schlüssel und auf die für dieses Projekt verbotenen Pfade.')),
+    h('div', { class: 'hinweisbox warn' }, sym('warnung'), h('div', {}, /\.(zip|apk|jar)$/i.test(d.name)
+      ? 'Die Datei geht so, wie sie ist, öffentlich nach GitHub. FAH-Git prüft vorher das Inhaltsverzeichnis der ZIP auf Schlüssel und auf die für dieses Projekt verbotenen Pfade.'
+      : 'Die Datei geht so, wie sie ist, öffentlich nach GitHub. FAH-Git prüft vorher Prüfvermerk und Prüfsumme und liest bei einer ISO den Inhalt (eigene Teile, eingebettete Archive) auf Schlüssel, private Begriffe und die für dieses Projekt verbotenen Pfade.')),
     feld('Version', version, 'Wird als Tag auf GitHub angelegt. Leer = Datum und Uhrzeit der Datei. Jede Version nur einmal.'),
     feld('Titel', titel, 'Leer = die Version.'),
     feld('Beschreibung', text, 'Steht auf der Release-Seite (optional).'),
-    info('Danach bleibt auf GitHub nur dieses neueste Release: ältere Releases und ihre Tags löscht FAH-Git nach dem Hochladen.')),
-  [{ text: 'Abbrechen' }, { text: 'Veröffentlichen', art: 'haupt', aktion: async () => {
-    meldung(`${d.name} geht zu GitHub …`);
-    return api('POST', '/github/release-ablage', { pfad: p.pfad, id: s.id, version: version.value.trim(), titel: titel.value.trim(), text: text.value.trim() });
-  } }]);
-  if (r) {
-    const e = r.entfernt || {};
-    if ((e.fehler || []).length) { fehlerMelden(new Error(`Release angelegt – Altes auf GitHub nicht ganz entfernt: ${e.fehler.join('; ')}`)); return; }
-    meldung((e.releases || []).length || (e.tags || []).length ? `Veröffentlicht · ${(e.releases || []).length} ältere(s) Release(s) und ${(e.tags || []).length} Tag(s) entfernt` : 'Veröffentlicht');
-    setTimeout(() => location.reload(), 1500);
-  }
+    info('Läuft im Hintergrund: Fortschritt mit Restzeit im Reiter Releases und in der Spiegel-Zeile – auch nach dem Neuladen der Seite. Danach bleibt auf GitHub nur dieses neueste Release: ältere Releases und ihre Tags löscht FAH-Git nach dem Hochladen.')),
+  [{ text: 'Abbrechen' }, { text: 'Veröffentlichen', art: 'haupt', aktion: () => api('POST', '/github/release-ablage',
+    { pfad: p.pfad, id: s.id, version: version.value.trim(), titel: titel.value.trim(), text: text.value.trim() }) }]);
+  if (r && r.auftrag) { meldung(`${d.name} geht zu GitHub – Fortschritt im Reiter Releases`); location.hash = url(p, 'releases'); setTimeout(() => location.reload(), 300); }
 }
 
 function spiegelAnsicht(p, admin) {
@@ -629,7 +686,8 @@ function spiegelAnsicht(p, admin) {
           s.art === 'github'
             ? h('td', { style: 'overflow-wrap:anywhere;min-width:8em' }, h('div', {}, h('strong', { style: 'overflow-wrap:normal' }, 'GitHub '), h('a', { class: 'mono', href: githubLink(s), target: '_blank', rel: 'noopener noreferrer' }, s.repo)),
               h('div', { class: 'schwach klein' }, githubArt(s)),
-              (s.releases || []).length ? h('div', { class: 'klein' }, 'Release: ', h('a', { href: s.releases[0].url, target: '_blank', rel: 'noopener noreferrer' }, `${s.releases[0].tag} (${s.releases[0].datei})`)) : null)
+              (s.releases || []).length ? h('div', { class: 'klein' }, 'Release: ', h('a', { href: s.releases[0].url, target: '_blank', rel: 'noopener noreferrer' }, `${s.releases[0].tag} (${s.releases[0].datei})`)) : null,
+              p.releases.lauf && p.releases.lauf.spiegel === s.id && p.releases.lauf.status === 'laeuft' ? releaseFortschritt(p.releases.lauf, { klein: true }) : null)
             : h('td', { style: 'overflow-wrap:anywhere' }, h('div', { class: 'mono' }, s.url), h('div', { class: 'schwach klein' }, s.benutzer ? `als ${s.benutzer}` : 'ohne Benutzer', s.aktiv ? '' : ' · pausiert')),
           h('td', {}, zustandText(s.zuletzt),
             s.zuletzt && s.zuletzt.gesperrt ? h('div', { style: 'margin-top:6px' }, h('button', { class: 'knopf klein gefahr', type: 'button', onclick: () => probelaufDialog(p, s) }, `${s.zuletzt.funde_gesamt} Fund(e) ansehen …`)) : null,
@@ -700,7 +758,7 @@ function nurAnsehen(p) {
 }
 
 function einstellungenAnsicht(p, ctx) {
-  const admin = !!ctx.zustand.ich.admin;
+  const admin = !!ctx.zustand.ich.admin && ctx.zustand.failover?.rolle !== 'ersatz';
   const name = h('input', { type: 'text', value: p.name, required: true, readonly: !admin });
   const beschreibung = h('textarea', {}, p.beschreibung);
   const themen = h('input', { type: 'text', value: p.themen.join(', '), placeholder: 'z. B. docker, python' });

@@ -69,6 +69,16 @@ Textdateien direkt im Browser bearbeiten – „Bearbeiten“, tippen, speichern
   eigenen Teile (`/fahnas`, `/nocloud`, GRUB-Menüs) und darin liegende `.tar.gz` (entpackt) gegen Schlüssel-Namen, die je
   Projekt verbotenen Pfade und die privaten Begriffe der GitHub-Bereinigung (Funde nennen nie den Begriff). Geprüft und
   hochgeladen wird aus demselben Dateigriff; ändert sich die Datei während des Hochladens, nimmt FAH-Git das Release zurück.
+- Fail-over (1.14.0): Eine zweite Instanz (z. B. auf dem NAS) hält sich laufend auf dem Stand des Haupts. Am Ersatz in der
+  `.env` `ROLLE=ersatz` setzen und starten – die Startseite fragt nach der Adresse des Haupts und dem Kopplungscode (am Haupt:
+  Einstellungen → Fail-over → „Kopplungscode erzeugen“). Danach fragt der Ersatz alle 15 Sekunden nach und holt nur
+  Geändertes: Projekte mit allen Zweigen und Tags (`git fetch`, Gelöschtes verschwindet), Ordner, Konten, Rechte,
+  Zugangsschlüssel, Einstellungen, Aktivität und Profilbilder. Anmelden geht dort mit denselben Zugangsdaten; ändern, pushen,
+  weiterleiten und sichern nicht (Antwort 423 bzw. git 403). Der Code geht nie übers Netz: Anfragen sind damit unterschrieben
+  (Zeitfenster 2 Minuten, jeder Einmalwert nur einmal), Antworten mit AES-256-GCM verschlüsselt; für git gibt es
+  kurzlebige Nur-Lese-Zugänge. Fällt der Haupt aus: am Ersatz Einstellungen → Fail-over → „Zum Haupt machen“ (später
+  „Wieder Ersatz werden“). Meldet der Haupt keine Repos, löscht der Ersatz aus Vorsicht nichts. Kachel „Fail-over“ in der
+  Übersicht zeigt, ob der Ersatz aktuell ist.
 - Im Browser bearbeiten (1.11.0): In der Dateiansicht einer Textdatei „Bearbeiten“ → Editor-Textfeld (Tab fügt einen
   Tabulator ein, Cmd/Strg+S speichert). Speichern legt einen Commit auf den Zweig; eine zwischenzeitliche Änderung wird
   erkannt und nicht überschrieben. Nur mit Schreibrecht, nicht in nur-lesbaren Kopien.

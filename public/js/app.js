@@ -10,10 +10,14 @@ import { h, sym, api, leeren, meldung, fehlerMelden, feld, info, dialog, bestaet
   profilbild, profilbildVorbereiten } from './hilfen.js';
 import { seitenbaum, grosseListe, flach, finde, zaehle, ordnerAuswahl, aufklappen, ordnerUrl, projektUrl } from './baum.js';
 import { projektSeite, zustandText, githubArt } from './projekt.js';
+import { koppelnSeite, ersterAbgleich, failoverHinweis, failoverKachel, failoverKarte } from './failover.js';
 
-const zustand = { ich: null, version: '', baum: null, fahnas: '' };
+const zustand = { ich: null, version: '', baum: null, fahnas: '', failover: { rolle: 'haupt' } };
+// Fail-over (1.14.0): Auf dem Ersatz ist alles nur lesbar – Schreibknöpfe bleiben weg (der Server antwortet sonst 423).
+export const istErsatz = () => zustand.failover?.rolle === 'ersatz';
+const schreibAdmin = () => !!zustand.ich?.admin && !istErsatz();
 const app = document.getElementById('app');
-let seite; let inhalt; let suchfeld; let nutzerKnopf; let neuKnopf;
+let seite; let inhalt; let suchfeld; let nutzerKnopf; let neuKnopf; let ersatzHinweis = null;
 
 // --- Rechte (wie src/rechte.js): Admins alles, sonst Freigaben {pfad, recht} für den Pfad und alles darunter ------------
 
@@ -21,6 +25,7 @@ const STUFE = { lesen: 1, schreiben: 2 };
 export function recht(pfad) {
   const ich = zustand.ich;
   if (!ich) return 0;
+  if (istErsatz()) return 1;
   if (ich.admin) return 2;
   let r = 0;
   for (const f of ich.freigaben || []) if (!f.pfad || pfad === f.pfad || String(pfad).startsWith(`${f.pfad}/`)) r = Math.max(r, STUFE[f.recht] || 0);
@@ -28,7 +33,7 @@ export function recht(pfad) {
 }
 export const darfSchreiben = (pfad) => recht(pfad) >= 2;
 /** Ordner ganz oben legen nur Admins an, Unterordner alle mit Schreibrecht auf den Elternordner. */
-const darfOrdnerIn = (eltern) => (eltern ? darfSchreiben(eltern) : !!zustand.ich?.admin);
+const darfOrdnerIn = (eltern) => (eltern ? darfSchreiben(eltern) : schreibAdmin());
 const alleOrdner = () => ['', ...flach(zustand.baum || { ordner: [], projekte: [] }).ordner.map((o) => o.pfad)];
 const kannProjektAnlegen = () => alleOrdner().some(darfSchreiben);
 const kannOrdnerAnlegen = () => alleOrdner().some(darfOrdnerIn);
@@ -39,7 +44,9 @@ async function start() {
   try {
     const s = await api('GET', '/status');
     zustand.version = s.version;
-    if (s.ersteinrichtung) return ersteinrichtung();
+    zustand.failover = s.failover || { rolle: 'haupt' };
+    if (istErsatz() && !zustand.failover.gekoppelt) return koppelnSeite(start);
+    if (s.ersteinrichtung) return istErsatz() ? ersterAbgleich(start) : ersteinrichtung();
     if (!s.nutzer) return anmeldung();
     zustand.ich = s.nutzer;
     zustand.fahnas = s.fahnas || '';
@@ -53,7 +60,7 @@ async function start() {
 
 window.addEventListener('fahgit:abgemeldet', () => { zustand.ich = null; anmeldung(); });
 
-function anmeldeKarte(titel, untertitel, felder, knopf, aktion) {
+export function anmeldeKarte(titel, untertitel, felder, knopf, aktion) {
   const fehler = h('div', { class: 'hinweisbox rot versteckt' });
   const form = h('form', { class: 'karte' },
     h('h1', {}, h('img', { src: '/static/symbol.svg', alt: '', width: 34, height: 34 }), titel),
@@ -104,16 +111,16 @@ function geruest() {
   neuKnopf.addEventListener('click', () => menue(neuKnopf, [
     kannProjektAnlegen() ? { text: 'Neues Projekt', symbol: 'projekt', aktion: () => neuesProjekt(aktuellerOrdner()) } : null,
     kannOrdnerAnlegen() ? { text: 'Neuer Ordner', symbol: 'ordner', aktion: () => neuerOrdner(aktuellerOrdner()) } : null,
-    ...(zustand.ich.admin ? ['trenner', { text: 'Aus GitLab oder Gitea übernehmen', symbol: 'import', href: '#/import' }] : []),
+    ...(schreibAdmin() ? ['trenner', { text: 'Aus GitLab oder Gitea übernehmen', symbol: 'import', href: '#/import' }] : []),
   ]));
   nutzerKnopf = h('button', { class: 'knopf nur-symbol konto-knopf', type: 'button', title: zustand.ich.anzeige, 'aria-label': 'Konto' });
   kopfBild();
   nutzerKnopf.addEventListener('click', () => menue(nutzerKnopf, [
     { text: `${zustand.ich.anzeige} (${zustand.ich.name})`, symbol: 'nutzer', href: '#/konto' },
     { text: 'Mein Konto & Zugangsschlüssel', symbol: 'schloss', href: '#/konto' },
-    zustand.ich.admin ? { text: 'Benutzer verwalten', symbol: 'nutzer', href: '#/nutzer' } : null,
+    schreibAdmin() ? { text: 'Benutzer verwalten', symbol: 'nutzer', href: '#/nutzer' } : null,
     zustand.ich.admin ? { text: 'Einstellungen', symbol: 'einstellungen', href: '#/einstellungen' } : null,
-    zustand.ich.admin ? { text: 'Sicherung', symbol: 'schild', href: '#/sicherung' } : null,
+    schreibAdmin() ? { text: 'Sicherung', symbol: 'schild', href: '#/sicherung' } : null,
     'trenner',
     // Nach dem Abmelden zur Übersicht: der nächste Nutzer soll nicht auf einer Seite landen, die er nicht sehen darf.
     { text: 'Abmelden', aktion: async () => { await api('POST', '/abmelden').catch(() => {}); zustand.ich = null; history.replaceState(null, '', '#/'); anmeldung(); } },
@@ -213,9 +220,9 @@ function aktuellerOrdner() {
 
 function seiteZeichnen() {
   if (!seite || !zustand.baum) return;
-  neuKnopf?.classList.toggle('versteckt', !(zustand.ich.admin || kannProjektAnlegen() || kannOrdnerAnlegen()));
+  neuKnopf?.classList.toggle('versteckt', !(schreibAdmin() || kannProjektAnlegen() || kannOrdnerAnlegen()));
   const unten = h('div', { class: 'seite-unten' },
-    zustand.ich.admin ? h('a', { href: '#/import' }, sym('import'), 'Übernehmen (GitLab/Gitea)') : null,
+    schreibAdmin() ? h('a', { href: '#/import' }, sym('import'), 'Übernehmen (GitLab/Gitea)') : null,
     h('a', { href: '#/konto' }, sym('schloss'), 'Zugangsschlüssel'),
     h('div', { class: 'schwach klein', style: 'padding:6px 8px' }, `FAH-Git ${zustand.version}`));
   leeren(seite, seitenbaum(zustand.baum, aktuellerPfad(), async (alt, neu) => {
@@ -228,7 +235,7 @@ function seiteZeichnen() {
       }
       route();
     } else seiteZeichnen();
-  }, { ziehen: !!zustand.ich.admin }), unten);
+  }, { ziehen: schreibAdmin() }), unten);
 }
 
 function sucheEinrichten(eingabe, treffer) {
@@ -296,7 +303,8 @@ async function route() {
     else if (r.art === 'import') el = await importSeite();
     else el = h('div', { class: 'leer-hinweis' }, 'Diese Seite gibt es nicht. ', h('a', { href: '#/' }, 'Zur Übersicht'));
     if (nr !== lauf) return;
-    leeren(inhalt, el);
+    if (istErsatz() && !ersatzHinweis) ersatzHinweis = failoverHinweis();
+    leeren(inhalt, istErsatz() ? ersatzHinweis : null, el);
     if (r.art === 'projekt' || r.art === 'ordner') seiteZeichnen();
     window.scrollTo(0, 0);
   } catch (e) {
@@ -322,7 +330,7 @@ function ereignisText(e) {
   }
   if (e.art === 'spiegel') return [h('span', { class: `marker ${e.ergebnis === 'fehler' ? 'rot' : 'warn'}` }, 'Spiegel'), ' ', projekt, ': ', e.text];
   if (e.art === 'quelle') return [h('span', { class: 'marker rot' }, 'Kopie'), ' ', projekt, ': ', e.text];
-  if (e.art === 'import') return [wer, ' – ', e.text];
+  if (e.art === 'import' || e.art === 'failover') return [wer, ' – ', e.text];
   if (e.art === 'verschoben') {
     const ziel = e.projekt ? h('a', { href: e.ordner ? ordnerUrl(e.projekt) : projektUrl(e.projekt) }, e.projekt) : null;
     return [wer, ' hat ', h('code', {}, e.alt || '?'), ' verschoben nach ', ziel];
@@ -341,9 +349,9 @@ async function uebersicht() {
   const [u] = await Promise.all([api('GET', '/uebersicht'), baumLaden()]);
   const probleme = u.spiegel.filter((s) => s.aktiv && s.zuletzt && s.zuletzt.ergebnis !== 'ok');
   const listenKarte = h('div', { class: 'karte' });
-  const admin = !!zustand.ich.admin;
+  const admin = schreibAdmin();
   const listeZeichnen = () => leeren(listenKarte,
-    h('div', { class: 'karten-kopf' }, h('h2', {}, admin ? 'Alle Projekte' : 'Deine Projekte'),
+    h('div', { class: 'karten-kopf' }, h('h2', {}, zustand.ich.admin ? 'Alle Projekte' : 'Deine Projekte'),
       h('div', { class: 'zeile' },
         admin ? h('span', { class: 'schwach klein', title: 'Projekte und Ordner auf einen Ordner ziehen, um sie zu verschieben' }, 'Ziehen zum Verschieben') : null,
         admin ? h('button', { class: 'knopf klein', type: 'button', onclick: () => neuerOrdner('') }, sym('ordner'), 'Ordner') : null,
@@ -374,7 +382,8 @@ async function uebersicht() {
           u.sicherung.laeuft ? `läuft${u.sicherung.prozent == null ? '' : ` · ${u.sicherung.prozent} %`}` : u.sicherung.letzte ? vorZeit(u.sicherung.letzte.erstellt) : (u.sicherung.auto ? 'läuft an' : 'keine'))) : null,
       u.github && (u.github.eingerichtet || u.github.anzahl) ? h('a', { href: '#/einstellungen', class: `karte kachel ${u.github.eingerichtet ? '' : 'schlecht'}`, style: 'color:inherit;text-decoration:none', title: u.github.konto ? `Konto ${u.github.konto}` : '' },
         h('span', { class: 'titel' }, sym('spiegel'), 'GitHub'),
-        h('span', { class: 'wert' }, !u.github.eingerichtet ? 'Token fehlt' : `${u.github.anzahl} Projekt${u.github.anzahl === 1 ? '' : 'e'}`)) : null),
+        h('span', { class: 'wert' }, !u.github.eingerichtet ? 'Token fehlt' : `${u.github.anzahl} Projekt${u.github.anzahl === 1 ? '' : 'e'}`)) : null,
+      failoverKachel(u.failover)),
     h('div', { class: 'spalten' }, listenKarte,
       h('div', {}, spiegelKarte,
         u.zuletzt.length ? h('div', { class: 'karte abschnitt' }, h('div', { class: 'karten-kopf' }, h('h3', {}, 'Zuletzt geändert')),
@@ -401,7 +410,7 @@ async function ordnerSeite(pfad) {
   const o = finde(zustand.baum, pfad);
   if (!o) throw new Error('Diesen Ordner gibt es nicht (mehr).');
   aufklappen(pfad);
-  const admin = !!zustand.ich.admin;
+  const admin = schreibAdmin();
   const mehr = h('button', { class: 'knopf nur-symbol', type: 'button', 'aria-label': 'Weitere Aktionen' }, sym('mehr'));
   mehr.addEventListener('click', () => menue(mehr, [
     { text: 'Umbenennen / Beschreibung', symbol: 'einstellungen', aktion: () => ordnerAendern(o) },
@@ -662,6 +671,10 @@ async function nutzerSeite() {
 }
 
 async function einstellungenSeite() {
+  const foKarte = h('div', { class: 'karte abschnitt' });
+  await failoverKarte(foKarte);
+  // Auf dem Ersatz gibt es hier nur den Fail-over (alles andere kommt vom Haupt und ist nicht änderbar).
+  if (istErsatz()) return h('div', {}, h('h1', {}, sym('einstellungen'), 'Einstellungen'), h('p', { class: 'untertitel' }, `FAH-Git ${zustand.version}`), foKarte);
   const [e] = await Promise.all([api('GET', '/einstellungen'), baumLaden()]);
   const adresse = h('input', { type: 'url', value: e.adresse || '', placeholder: `${location.protocol}//${location.host}` });
   const fahnas = h('input', { type: 'url', value: e.fahnas_adresse || '', placeholder: 'https://nas.example:8443' });
@@ -704,7 +717,7 @@ async function einstellungenSeite() {
   regelnZeichnen();
   const githubKarte = h('div', { class: 'karte abschnitt' });
   await githubZeichnen(githubKarte);
-  return h('div', {}, h('h1', {}, sym('einstellungen'), 'Einstellungen'), h('p', { class: 'untertitel' }, `FAH-Git ${zustand.version}`), form, githubKarte, regelKarte);
+  return h('div', {}, h('h1', {}, sym('einstellungen'), 'Einstellungen'), h('p', { class: 'untertitel' }, `FAH-Git ${zustand.version}`), form, foKarte, githubKarte, regelKarte);
 }
 
 // GitHub (1.8.0): Token EINMAL hinterlegen; was und wann übertragen wird, legt der Betreiber je Projekt-Spiegel fest.

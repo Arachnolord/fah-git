@@ -114,7 +114,7 @@ export class Sicherung {
     try {
       // Nur Dinge auf oberster Ebene aufzählen (statt tar-eigenem --exclude, das busybox nicht sicher kann): erfasst
       // repos/, *.json, geheim.key, avatare/ und alles Neue automatisch – nur _backups und halbe .tmp bleiben außen vor.
-      const eintraege = (await fsp.readdir(this.daten)).filter((n) => n !== UNTERORDNER && !n.endsWith('.tmp'));
+      const eintraege = (await fsp.readdir(this.daten)).filter((n) => n !== UNTERORDNER && n !== '_failover' && !n.endsWith('.tmp'));
       await this._packen(teil, eintraege, await this._rohgroesse(eintraege));
       await fsp.rename(teil, ziel);
       this._schrittEnde('packen');
@@ -334,7 +334,8 @@ export class Sicherung {
       const beiseite = path.join(this.ordner, `.ersetzt-${stempel()}`);
       await fsp.mkdir(beiseite, { recursive: true });
       for (const n of await fsp.readdir(this.daten)) {
-        if (n === UNTERORDNER) continue;
+        // _failover (Rolle „übernommen“, Kopplung) gehört zu diesem Rechner, nicht zur Sicherung – bleibt stehen.
+        if (n === UNTERORDNER || n === '_failover') continue;
         await fsp.rename(path.join(this.daten, n), path.join(beiseite, n));
       }
       for (const n of await fsp.readdir(stage)) {

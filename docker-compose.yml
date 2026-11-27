@@ -10,6 +10,11 @@ services:
       TZ: Europe/Berlin
       # Optional: feste Adresse für Klon-Links (sonst die, unter der FAH-Git aufgerufen wird).
       FAHGIT_ADRESSE: ${ADRESSE:-}
+      # Fail-over (1.14.0): ROLLE=ersatz macht diese Instanz zum Ersatz, der sich laufend vom Haupt abgleicht und nur lesen
+      # lässt. Koppeln geht in der Oberfläche; wahlweise hier HAUPT=http://<haupt>:3300 und KOPPLUNG=fgfo_… (Code vom Haupt).
+      FAHGIT_ROLLE: ${ROLLE:-}
+      FAHGIT_HAUPT: ${HAUPT:-}
+      FAHGIT_KOPPLUNG: ${KOPPLUNG:-}
     volumes:
       - ./daten:/daten
       # Release-Ablage (1.12.0): Ordner mit fertigen ZIPs/ISOs, NUR LESEND. In der .env: ABLAGE=<Ordner auf dem NAS>.

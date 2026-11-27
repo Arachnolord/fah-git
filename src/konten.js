@@ -230,7 +230,8 @@ export class Konten {
     if (!s) return null;
     const n = d.nutzer.find((x) => x.name === s.nutzer);
     if (!n) return null;
-    if (!s.zuletzt || Date.now() - Date.parse(s.zuletzt) > 3600_000) {
+    // Auf dem Fail-over-Ersatz (nurLesen) nichts schreiben – nutzer.json kommt dort nur vom Haupt.
+    if (!this.nurLesen && (!s.zuletzt || Date.now() - Date.parse(s.zuletzt) > 3600_000)) {
       this.aendern((dd) => { const x = dd.schluessel.find((y) => y.id === s.id); if (x) x.zuletzt = new Date().toISOString(); }).catch(() => {});
     }
     return s.recht === 'lesen' ? { ...oeffentlich(n), leseSchluessel: true } : oeffentlich(n);

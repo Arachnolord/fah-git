@@ -52,6 +52,33 @@ export class Speicher {
     return lauf;
   }
 
+  /**
+   * Datei komplett durch `inhalt` (Buffer) ersetzen – in derselben Reihenfolge wie `aendern`, damit eine laufende Änderung
+   * den neuen Stand nicht mit einem alten überschreibt (Fail-over-Ersatz übernimmt so die Dateien des Haupts).
+   */
+  ersetzen(name, inhalt) {
+    const vorher = this.ketten.get(name) || Promise.resolve();
+    const lauf = vorher.catch(() => {}).then(async () => {
+      const ziel = this.datei(name);
+      const tmp = `${ziel}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`;
+      await fs.writeFile(tmp, inhalt, { mode: 0o600 });
+      await fs.rename(tmp, ziel);
+    });
+    this.ketten.set(name, lauf.catch(() => {}));
+    return lauf;
+  }
+
+  /** Datei löschen – ebenfalls in der Reihenfolge von `aendern`. */
+  entfernen(name) {
+    const vorher = this.ketten.get(name) || Promise.resolve();
+    const lauf = vorher.catch(() => {}).then(() => fs.rm(this.datei(name), { force: true }));
+    this.ketten.set(name, lauf.catch(() => {}));
+    return lauf;
+  }
+
+  /** Nach dem Austausch von geheim.key: beim nächsten Zugriff neu lesen. */
+  geheimnisVergessen() { this._geheimnis = null; }
+
   /** Geheimer Schlüssel (32 Byte) für Sitzungen und verschlüsselte Zugangsdaten; beim ersten Start erzeugt. */
   geheimnis() {
     if (this._geheimnis) return this._geheimnis;

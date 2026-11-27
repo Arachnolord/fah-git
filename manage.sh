@@ -30,7 +30,7 @@ env_anlegen() {
   local port
   port="$(erster_freier_port 3300)"
   umask 077
-  printf '# Von manage.sh angelegt. Wird bei Updates nie überschrieben.\nPORT=%s\nADRESSE=\n# Release-Ablage (nur lesend), z. B. ein Ordner der NAS-Freigabe mit fertigen ZIPs\nABLAGE=\n' "$port" >.env
+  printf '# Von manage.sh angelegt. Wird bei Updates nie überschrieben.\nPORT=%s\nADRESSE=\n# Release-Ablage (nur lesend), z. B. ein Ordner der NAS-Freigabe mit fertigen ZIPs\nABLAGE=\n# Fail-over: ROLLE=ersatz = nur lesende Kopie eines Haupts (Koppeln in der Oberfläche)\nROLLE=\n' "$port" >.env
   info "Erste Einrichtung: .env angelegt (Port $port)."
 }
 
@@ -42,7 +42,11 @@ zip_waehlen() {
 zip_einspielen() {
   local zip=$1 tmp quelle
   tmp="$(mktemp -d)"
-  unzip -o -q "$zip" -d "$tmp"
+  # Manche NAS haben kein unzip (UGREEN): dann Python oder 7z.
+  if command -v unzip >/dev/null 2>&1; then unzip -o -q "$zip" -d "$tmp"
+  elif command -v python3 >/dev/null 2>&1; then python3 -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' "$zip" "$tmp"
+  elif command -v 7z >/dev/null 2>&1; then 7z x -y -bd -o"$tmp" "$zip" >/dev/null
+  else fehler "Zum Entpacken fehlt unzip, python3 oder 7z"; fi
   quelle="$tmp"
   if [ ! -f "$tmp/manage.sh" ] && [ "$(find "$tmp" -mindepth 1 -maxdepth 1 | wc -l)" -eq 1 ]; then
     quelle="$(find "$tmp" -mindepth 1 -maxdepth 1 -type d | head -n 1)"

@@ -36,14 +36,17 @@ function basic(kopf) {
 }
 
 /**
- * @param {object} umgebung {baum, konten, nachPush(pfad, nutzer, aenderungen), nurLesen(pfad) → Text|null}
+ * @param {object} umgebung {baum, konten, nachPush(pfad, nutzer, aenderungen), nurLesen(pfad) → Text|null,
+ *   zusatzAnmeldung(name, geheim, quelle) → Nutzer|null (Fail-over-Ersatz, nur lesen)}
  */
-export function gitBearbeiter({ baum, konten, nachPush, nurLesen }) {
+export function gitBearbeiter({ baum, konten, nachPush, nurLesen, zusatzAnmeldung = null }) {
   return async function bearbeite(req, res, anfrage) {
     const anmeldung = basic(req.headers.authorization);
     const quelle = absender(req);
     let nutzer = null;
-    try { nutzer = anmeldung ? await konten.gitAnmeldung(anmeldung.name, anmeldung.geheim, quelle) : null; } catch (e) {
+    try {
+      nutzer = anmeldung ? ((zusatzAnmeldung && zusatzAnmeldung(anmeldung.name, anmeldung.geheim, quelle)) || await konten.gitAnmeldung(anmeldung.name, anmeldung.geheim, quelle)) : null;
+    } catch (e) {
       res.writeHead(e.status || 500, { 'Content-Type': 'text/plain; charset=utf-8' });
       return res.end(e.message);
     }

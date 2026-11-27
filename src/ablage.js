@@ -280,12 +280,15 @@ export class Ablage {
   }
 
   /** Nicht-ZIP vor dem Veröffentlichen: Vermerk muss da sein und Größe + SHA-256 (aus dem offenen Griff) stimmen. */
-  async vermerkPruefen(f) {
+  async vermerkPruefen(f, fortschritt) {
     const v = await this.vermerkLesen(f.rel);
     if (!v) throw new AblageFehler('Diese Datei lässt sich nicht prüfen und hat keinen Prüfvermerk des Bauskripts – nicht veröffentlicht', 400);
     if (v.groesse !== f.groesse) throw new AblageFehler('Prüfvermerk passt nicht zur Datei (Größe) – die öffentliche Fassung neu bauen (Bauskript), nicht den Vermerk', 409);
     const h = crypto.createHash('sha256');
-    for await (const teil of f.fh.createReadStream({ start: 0, end: f.groesse - 1, autoClose: false, highWaterMark: 1024 * 1024 })) h.update(teil);
+    let n = 0;
+    for await (const teil of f.fh.createReadStream({ start: 0, end: f.groesse - 1, autoClose: false, highWaterMark: 1024 * 1024 })) {
+      h.update(teil); n += teil.length; if (fortschritt) fortschritt(n);
+    }
     if (h.digest('hex') !== v.sha256) throw new AblageFehler('Prüfvermerk passt nicht zur Datei (Prüfsumme) – die öffentliche Fassung neu bauen (Bauskript), nicht den Vermerk', 409);
     return v;
   }
@@ -325,9 +328,9 @@ export class Ablage {
     return funde;
   }
 
-  async oeffentlichPruefen(f, verboten = [], { textPruefer } = {}) {
+  async oeffentlichPruefen(f, verboten = [], { textPruefer, fortschritt } = {}) {
     if (!PRUEFBAR.test(f.name)) {
-      await this.vermerkPruefen(f);
+      await this.vermerkPruefen(f, fortschritt);
       if (/\.iso$/i.test(f.name)) {
         const funde = await this.isoPruefen(f, { verboten, textPruefer });
         if (funde.length) throw new AblageFehler(`Nicht veröffentlicht – die ISO enthält: ${funde.join(' · ')}`, 409);
