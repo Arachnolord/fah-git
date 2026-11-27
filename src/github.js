@@ -78,7 +78,7 @@ export class GitHub {
       if (!Array.isArray(d)) break;
       for (const x of d) {
         if (!x || typeof x.full_name !== 'string' || !REPO_NAME.test(x.full_name)) continue;
-        liste.push({ repo: x.full_name, privat: !!x.private, standard: x.default_branch || '', schreiben: !x.permissions || x.permissions.push !== false,
+        liste.push({ repo: x.full_name, id: kennung(x.id), privat: !!x.private, standard: x.default_branch || '', schreiben: !x.permissions || x.permissions.push !== false,
           beschreibung: String(x.description || '').slice(0, 200), archiviert: !!x.archived });
       }
       if (d.length < 100) break;
@@ -92,7 +92,7 @@ export class GitHub {
     if (r.status === 404) throw fehler(`Repo ${repo} auf GitHub nicht gefunden oder der Token sieht es nicht`, 404);
     if (!r.ok) throw fehler(`GitHub antwortet mit ${r.status}`, 502);
     const d = await r.json();
-    return { privat: d.private !== false };
+    return { privat: d.private !== false, id: kennung(d.id) };
   }
 
   /** Repo öffentlich oder privat stellen (1.9.0, nur für bereinigte Spiegel). */
@@ -177,9 +177,12 @@ export class GitHub {
     if (r.status === 403 || r.status === 404) throw fehler('Der Token darf keine Repos anlegen (klassisch: Recht „repo“; fein: „Administration: Lesen und Schreiben“)');
     if (!r.ok) throw fehler(`GitHub antwortet mit ${r.status}`, 502);
     const d = await r.json();
-    return { repo: repoPruefen(d.full_name) };
+    return { repo: repoPruefen(d.full_name), id: kennung(d.id) };
   }
 }
+
+/** GitHubs feste Repo-Kennung (bleibt beim Umbenennen, ist nach Löschen + Neuanlegen eine andere) → Text oder null. */
+function kennung(id) { return Number.isSafeInteger(id) && id > 0 ? String(id) : null; }
 
 /** GitHub-eigene Ablehnungsgründe beim Push in Alltagssprache, sonst null. */
 export function githubGrund(text) {

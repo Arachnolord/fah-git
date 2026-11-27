@@ -49,6 +49,8 @@ const INHALT_ARCHIV = /\.(zip|7z|rar|tar|tgz|gz|bz2|xz|dmg|iso)$/i;
 const ZIP_VERZEICHNIS_MAX = 32 * 1024 * 1024;
 export const VERMERK_ENDUNG = '.pruefung.json';
 const ZIP_EINTRAEGE_MAX = 300000;
+// Inhaltsprüfung beim Veröffentlichen (1.15.4): Einträge bis zu dieser Größe werden entpackt und als Text geprüft.
+const ZIP_TEXT_MAX = 8 * 1024 * 1024;
 
 export class AblageFehler extends Error {
   constructor(text, status = 400) { super(text); this.status = status; }
@@ -170,7 +172,10 @@ export class Ablage {
    * Einträge einer ZIP (auch ZIP64), ohne zu entpacken. Zentralverzeichnis vollständig (Anzahl + Länge stimmen) UND jeder
    * lokale Kopf passt dazu, lückenlos von 0 bis zum Verzeichnis – sonst könnten Einträge an der Prüfung vorbei stecken.
    */
-  async zipNamen(fh) {
+  async zipNamen(fh) { return (await this.zipEintraege(fh)).map((x) => x.name); }
+
+  /** Wie zipNamen, aber je Eintrag mit Packart, Größen und Lage der Daten (für die Inhaltsprüfung, 1.15.4). */
+  async zipEintraege(fh) {
     const lies = async (laenge, pos) => {
       const b = Buffer.alloc(laenge);
       const { bytesRead } = await fh.read(b, 0, laenge, pos);
@@ -200,7 +205,7 @@ export class Ablage {
     let o = 0;
     while (o < cd.length) {
       if (o + 46 > cd.length || cd.readUInt32LE(o) !== 0x02014b50) throw new AblageFehler('ZIP-Verzeichnis beschädigt', 409);
-      const flags = cd.readUInt16LE(o + 8);
+      const flags = cd.readUInt16LE(o + 8); const methode = cd.readUInt16LE(o + 10);
       let csize = cd.readUInt32LE(o + 20); let usize = cd.readUInt32LE(o + 24);
       const nl = cd.readUInt16LE(o + 28); const el = cd.readUInt16LE(o + 30); const kl = cd.readUInt16LE(o + 32);
       let offset = cd.readUInt32LE(o + 42);
@@ -217,7 +222,7 @@ export class Ablage {
         }
         x += 4 + len;
       }
-      eintraege.push({ name: nameRoh.toString('utf8'), nameRoh, flags, csize, offset, zip64 });
+      eintraege.push({ name: nameRoh.toString('utf8'), nameRoh, flags, methode, csize, usize, offset, zip64 });
       if (eintraege.length > anzahl) break;
       o += 46 + nl + el + kl;
     }
@@ -231,6 +236,7 @@ export class Ablage {
       const lnl = k.readUInt16LE(26); const lel = k.readUInt16LE(28);
       const lname = await lies(lnl, pos + 30);
       if (!lname.equals(en.nameRoh)) throw new AblageFehler('ZIP-Eintrag heißt im Kopf anders als im Verzeichnis – nicht prüfbar', 409);
+      en.daten = pos + 30 + lnl + lel;
       pos += 30 + lnl + lel + en.csize;
       if (en.flags & 0x08) {                                                                       // Datenbeschreibung
         const sig = (await lies(4, pos)).readUInt32LE(0) === 0x08074b50 ? 4 : 0;
@@ -239,7 +245,35 @@ export class Ablage {
       if (pos > cdStart) throw new AblageFehler('ZIP-Eintrag reicht ins Verzeichnis – nicht prüfbar', 409);
     }
     if (pos !== cdStart) throw new AblageFehler('ZIP enthält Daten außerhalb des Verzeichnisses – nicht prüfbar', 409);
-    return eintraege.map((x) => x.name);
+    return eintraege.map(({ name, flags, methode, csize, usize, daten }) => ({ name, flags, methode, csize, usize, daten }));
+  }
+
+  /**
+   * Text-Inhalte einer ZIP prüfen (1.15.4): jeder Eintrag bis ZIP_TEXT_MAX wird entpackt und – wenn er kein Binär ist –
+   * mit `textPruefer(rel, text)` gegen die privaten Regeln des GitHub-Spiegels geprüft. Vorher prüfte das Veröffentlichen
+   * einer ZIP nur die Namen; ein Quell-Kopfkommentar mit Wohnadresse ging so unbemerkt in ein öffentliches Release.
+   * Was sich nicht lesen lässt (verschlüsselt, fremde Packart, kaputt), sperrt ebenfalls – ungeprüft geht nichts raus.
+   */
+  async zipTextFunde(fh, textPruefer) {
+    const funde = [];
+    const dazu = (t) => { if (funde.length < 8 && !funde.includes(t)) funde.push(t); };
+    for (const e of await this.zipEintraege(fh)) {
+      if (funde.length >= 8) break;
+      const n = nameNorm(e.name);
+      if (n.endsWith('/') || e.usize === 0) continue;
+      if (e.flags & 0x01) { dazu(`${n} (verschlüsselt – nicht prüfbar)`); continue; }
+      if (e.usize > ZIP_TEXT_MAX) continue;                                         // große Dateien sind Programme/Medien
+      if (e.methode !== 0 && e.methode !== 8) { dazu(`${n} (unbekannte Packart – nicht prüfbar)`); continue; }
+      if (e.csize > ZIP_TEXT_MAX + 1024 * 1024) { dazu(`${n} (Größenangaben unplausibel – nicht prüfbar)`); continue; }
+      const roh = Buffer.alloc(e.csize);
+      const { bytesRead } = await fh.read(roh, 0, e.csize, e.daten);
+      if (bytesRead !== e.csize) { dazu(`${n} (unvollständig – nicht prüfbar)`); continue; }
+      let buf;
+      try { buf = e.methode === 0 ? roh : zlib.inflateRawSync(roh, { maxOutputLength: ZIP_TEXT_MAX }); } catch { dazu(`${n} (nicht entpackbar – nicht prüfbar)`); continue; }
+      if (buf.subarray(0, 8192).includes(0)) continue;                              // Binär (wie bei der ISO)
+      for (const t of textPruefer(n, buf.toString('utf8'))) dazu(`${n} (${t})`);
+    }
+    return funde;
   }
 
   /** Schlüssel/Zugangsdaten in einer ZIP suchen (für JEDE zugeordnete ZIP). → Liste der Funde (höchstens 8). */
@@ -352,6 +386,7 @@ export class Ablage {
       else { const v = regeln.find((x) => klein.includes(x)); if (v) funde.push(`${n} (für dieses Projekt verboten: ${v})`); }
       if (funde.length >= 8) break;
     }
+    if (!funde.length && textPruefer) funde.push(...await this.zipTextFunde(f.fh, textPruefer));
     if (funde.length) throw new AblageFehler(`Nicht veröffentlicht – die ZIP enthält: ${funde.join(' · ')}`, 409);
   }
 }

@@ -698,13 +698,20 @@ export function erstelleServer({ daten, oeffentlicheAdresse = '', github: github
         zweigListe(b.zweige);
         const grund = regelVerletzt((await einstellungen()).ziel_regeln || [], pfad, `${gh.web}/x/y.git`);
         if (grund) throw new HttpFehler(403, grund);
-        let repoName; let sichtbarkeit;
-        if (name) { repoName = (await gh.anlegen(token, name, (await baum.projektMeta(pfad)).beschreibung || '')).repo; sichtbarkeit = 'privat'; }
-        else {
+        let repoName; let sichtbarkeit; let ghid; let neu;
+        if (name) {
+          const angelegt = await gh.anlegen(token, name, (await baum.projektMeta(pfad)).beschreibung || '');
+          repoName = angelegt.repo; ghid = angelegt.id; sichtbarkeit = 'privat'; neu = true;
+          await spiegel.eigenesRepoMerken(ghid, { repo: repoName, projekt: pfad, belastet: modus === 'voll' });
+        } else {
           repoName = repoPruefen(b.github);
-          sichtbarkeit = (await gh.repoInfo(token, repoName)).privat ? 'privat' : 'oeffentlich';
+          const info = await gh.repoInfo(token, repoName);
+          sichtbarkeit = info.privat ? 'privat' : 'oeffentlich'; ghid = info.id;
+          // 1.15.4: von FAH-Git für DIESES Projekt angelegt und nie voll gespiegelt → bleibt veröffentlichbar
+          neu = await spiegel.wiederVeroeffentlichbar(ghid, pfad, modus);
         }
-        const s = await spiegel.githubAnlegen(pfad, { repo: repoName, url: gh.pushAdresse(repoName), auto: b.auto === true, zweige: b.zweige, modus, sichtbarkeit, neu: !!name });
+        const s = await spiegel.githubAnlegen(pfad, { repo: repoName, url: gh.pushAdresse(repoName), auto: b.auto === true, zweige: b.zweige, modus, sichtbarkeit, neu, ghid });
+        if (modus === 'voll') await spiegel.eigenesRepoBelasten(ghid);
         if (Array.isArray(b.nur)) await spiegel.befund(pfad, { aktion: 'nur', fps: b.nur });
         if (b.jetzt === true) spiegel.weiterleiten(pfad, s.id).catch(() => {});
         return json(res, 200, s);
@@ -856,7 +863,15 @@ export function erstelleServer({ daten, oeffentlicheAdresse = '', github: github
       await speicher.aendern('einstellungen.json', {}, (e) => { if (e.github) { e.github.konto = login; e.github.name = name; e.github.geprueft = geprueft; } });
       return json(res, 200, { eingerichtet: true, konto: login, geprueft });
     }
-    if (weg === '/github/repos' && m === 'GET') return json(res, 200, await gh.repos(await githubToken()));
+    if (weg === '/github/repos' && m === 'GET') {
+      // 1.15.4: je Repo, ob FAH-Git es für das angefragte Projekt angelegt hat (→ nach dem Verbinden öffentlich stellbar)
+      const liste = await gh.repos(await githubToken());
+      const eigene = await spiegel.eigeneRepos();
+      return json(res, 200, liste.map(({ id, ...r }) => {
+        const e = id ? eigene[id] : null;
+        return { ...r, fahgit: e ? (e.projekt === q.pfad && !e.belastet ? 'veroeffentlichbar' : 'angelegt') : null };
+      }));
+    }
     if (weg === '/github/bereinigung' && m === 'PUT') {
       const neu = bereinigungPruefen(await koerper(req));
       await speicher.aendern('einstellungen.json', {}, (e) => { e.github_bereinigung = neu; });

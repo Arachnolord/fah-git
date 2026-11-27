@@ -63,6 +63,8 @@ Textdateien direkt im Browser bearbeiten – „Bearbeiten“, tippen, speichern
   gesperrt; keine Verweise/harten Links, Pfade bleiben in der Ablage. ZIPs werden über Inhaltsverzeichnis UND Dateiköpfe
   lückenlos gelesen; ZIPs mit Schlüssel- oder Zugangsdateien bzw. `.git`-Ordner lassen sich gar nicht zuordnen (`.env`-Vorlagen wie `.env.example` oder `.env.edeka.example` sind erlaubt, solange der Name auf die Vorlagen-Endung endet – 1.15.3). Vor dem
   Veröffentlichen sperren zusätzlich verschachtelte Archive und je Projekt verbotene Pfade (z. B. `lokale-stimme/`).
+  Seit 1.15.4 liest FAH-Git dabei auch den Text jeder Datei in der ZIP (bis 8 MB, Binäres ausgenommen) und prüft ihn mit den
+  privaten Regeln des GitHub-Spiegels (z. B. ein Quell-Kopfkommentar mit Adresse); verschlüsselte oder nicht lesbare Einträge sperren.
   Öffentlich kann eine ZIP sein (Inhalt geprüft) oder – seit 1.13.0 – eine andere Datei (z. B. Installer-ISO) mit Prüfvermerk
   des Bauskripts daneben (`<datei>.pruefung.json` mit `datei`, `groesse`, `sha256`, `werkzeug`): FAH-Git rechnet die
   Prüfsumme vor dem Hochladen nach. Eine ISO liest FAH-Git zusätzlich selbst (ISO 9660 mit Rock Ridge): alle Pfade, die

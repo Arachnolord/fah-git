@@ -159,14 +159,14 @@ export class Spiegel {
   }
 
   /** GitHub-Spiegel anlegen: Repo „besitzer/name“, Vorgabe nur von Hand und alles. Überträgt NICHTS von selbst. */
-  async githubAnlegen(pfad, { repo, url, auto, zweige, modus, sichtbarkeit = null, neu = false }) {
+  async githubAnlegen(pfad, { repo, url, auto, zweige, modus, sichtbarkeit = null, neu = false, ghid = null }) {
     const r = repoPruefen(repo);
     const grund = regelVerletzt(await this.regeln(), pfad, url);
     if (grund) throw Object.assign(new Error(grund), { status: 403 });
     const m = modus === 'oeffentlich' ? 'oeffentlich' : 'voll';
     if (m === 'voll' && sichtbarkeit === 'oeffentlich') throw Object.assign(new Error(VOLL_OEFFENTLICH), { status: 400 });
     const eintrag = { id: crypto.randomBytes(5).toString('hex'), art: 'github', repo: r, url, auto: auto === true, zweige: zweigListe(zweige),
-      modus: m, sichtbarkeit, neu: !!neu, belastet: m === 'voll', aktiv: true, erstellt: new Date().toISOString(), zuletzt: null };
+      modus: m, sichtbarkeit, neu: !!neu, belastet: m === 'voll', ghid: ghid || null, aktiv: true, erstellt: new Date().toISOString(), zuletzt: null };
     await this.baum.projektAendern(pfad, (p) => {
       if ((p.spiegel || []).some((x) => x.art === 'github' && x.repo.toLowerCase() === r.toLowerCase())) throw Object.assign(new Error(`Das Projekt spiegelt schon nach ${r}`), { status: 409 });
       p.spiegel = [...(p.spiegel || []), eintrag];
@@ -174,7 +174,38 @@ export class Spiegel {
     return this.oeffentlich(eintrag);
   }
 
+  // --- Von FAH-Git selbst angelegte GitHub-Repos (1.15.4) ----------------------------------------------------------
+  // Betreiber 27.11.2026 (fah-cockpit): Spiegel gelöscht und neu verbunden → der Dialog wählte das vorhandene Repo, „neu“
+  // ging verloren, öffentlich stellen war für immer gesperrt. Darum merkt sich FAH-Git je GitHub-Kennung (nicht Name: ein
+  // gelöschtes und von Hand neu angelegtes Repo hat eine andere), welches Projekt das Repo angelegt hat und ob dort je ein
+  // Vollstand lag. Eigener Schlüssel in einstellungen.json, damit „GitHub trennen“ die Liste nicht löscht.
+
+  async eigeneRepos() { return (await this.speicher.lesen('einstellungen.json', {})).github_eigene || {}; }
+
+  async eigenesRepoMerken(ghid, { repo, projekt, belastet }) {
+    if (!ghid) return;
+    await this.speicher.aendern('einstellungen.json', {}, (e) => {
+      const l = (e.github_eigene = e.github_eigene || {});
+      const alt = l[ghid];
+      l[ghid] = { repo, projekt, erstellt: alt ? alt.erstellt : new Date().toISOString(), belastet: !!(belastet || (alt && alt.belastet)) };
+    });
+  }
+
+  /** Lag (oder liegt) je ein Vollstand im Repo, bleibt es für immer privat. */
+  async eigenesRepoBelasten(ghid) {
+    if (!ghid) return;
+    await this.speicher.aendern('einstellungen.json', {}, (e) => { if (e.github_eigene && e.github_eigene[ghid]) e.github_eigene[ghid].belastet = true; });
+  }
+
+  /** Darf ein wieder verbundenes Repo veröffentlicht werden? Nur dasselbe Projekt, nie belastet, nur „Öffentlicher Stand“. */
+  async wiederVeroeffentlichbar(ghid, projekt, modus) {
+    if (!ghid || modus !== 'oeffentlich') return false;
+    const e = (await this.eigeneRepos())[ghid];
+    return !!e && e.projekt === projekt && !e.belastet;
+  }
+
   async weiterleitenAendern(pfad, id, { aktiv, benutzer, geheim, auto, zweige, modus }) {
+    let belasten = null;
     await this.baum.projektAendern(pfad, (p) => {
       const s = (p.spiegel || []).find((x) => x.id === id);
       if (!s) throw Object.assign(new Error('Spiegel fehlt'), { status: 404 });
@@ -187,6 +218,7 @@ export class Spiegel {
             // Wechsel: alter Zustand gilt nicht mehr; war/ist es ein Vollspiegel, liegt (evtl.) Verlauf am Ziel → nie öffentlich stellen
             s.zuletzt = null;
             s.belastet = true;
+            belasten = s.ghid || null;
           }
           s.modus = m;
         }
@@ -197,6 +229,7 @@ export class Spiegel {
       if (benutzer != null) s.benutzer = String(benutzer).trim().slice(0, 100);
       if (geheim) s.geheim = this.speicher.verschluesseln(geheim);
     });
+    if (belasten) await this.eigenesRepoBelasten(belasten);
   }
 
   async weiterleitenLoeschen(pfad, id) {

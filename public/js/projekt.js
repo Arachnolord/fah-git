@@ -448,7 +448,7 @@ async function githubNeu(p) {
     if (weiter) location.hash = '#/einstellungen';
     return;
   }
-  try { repos = await api('GET', '/github/repos'); } catch (e) { return fehlerMelden(e); }
+  try { repos = await api('GET', `/github/repos?pfad=${encodeURIComponent(p.pfad)}`); } catch (e) { return fehlerMelden(e); }
   const NEU = '__neu__';
   const vergeben = new Set(p.spiegel.filter((s) => s.art === 'github').map((s) => s.repo.toLowerCase()));
   const suche = h('input', { type: 'search', placeholder: 'Repo suchen …', autocomplete: 'off' });
@@ -462,18 +462,32 @@ async function githubNeu(p) {
     leeren(auswahl, h('option', { value: NEU }, '+ Neues privates Repo anlegen …'),
       repos.filter((r) => !f || r.repo.toLowerCase().includes(f)).map((r) => {
         const grund = vergeben.has(r.repo.toLowerCase()) ? 'schon verbunden' : !r.schreiben ? 'nur Leserecht' : r.archiviert ? 'archiviert' : '';
-        return h('option', { value: r.repo, disabled: !!grund }, `${r.repo}${r.privat ? ' (privat)' : ' (öffentlich)'}${grund ? ` – ${grund}` : ''}`);
+        const herkunft = r.fahgit === 'veroeffentlichbar' ? ' – von FAH-Git für dieses Projekt angelegt' : '';
+        return h('option', { value: r.repo, disabled: !!grund }, `${r.repo}${r.privat ? ' (privat)' : ' (öffentlich)'}${grund ? ` – ${grund}` : herkunft}`);
       }));
     if ([...auswahl.options].some((o) => o.value === gewaehlt && !o.disabled)) auswahl.value = gewaehlt;
+    hinweisZeigen();
+  };
+  // 1.15.4: Ein vorhandenes Repo kann alte Stände tragen und wird darum nie öffentlich – außer FAH-Git hat es selbst für
+  // dieses Projekt angelegt (z. B. Spiegel gelöscht und neu verbunden). Das steht jetzt sichtbar unter der Auswahl.
+  const hinweis = h('p', { class: 'klein', style: 'margin:6px 0 0;padding:6px 10px;border-radius:8px' });
+  const hinweisZeigen = () => {
     neuFeld.hidden = auswahl.value !== NEU;
+    const r = repos.find((x) => x.repo === auswahl.value);
+    hinweis.hidden = !r;
+    if (!r) return;
+    hinweis.style.background = r.fahgit === 'veroeffentlichbar' ? 'var(--erfolg-hell)' : 'var(--warnung-hell)';
+    hinweis.textContent = r.fahgit === 'veroeffentlichbar'
+      ? 'FAH-Git hat dieses Repo für dieses Projekt angelegt – mit „Öffentlicher Stand“ lässt es sich später öffentlich stellen.'
+      : 'Vorhandenes Repo: Es kann alte Stände enthalten und lässt sich darum nie öffentlich stellen. Zum Veröffentlichen „+ Neues privates Repo anlegen“ wählen.';
   };
   suche.addEventListener('input', zeichnen);
-  auswahl.addEventListener('change', () => { gewaehlt = auswahl.value; neuFeld.hidden = gewaehlt !== NEU; });
+  auswahl.addEventListener('change', () => { gewaehlt = auswahl.value; hinweisZeigen(); });
   zeichnen();
   const ww = wasWannFelder(p);
   const jetzt = h('input', { type: 'checkbox', checked: true });
   const r = await dialog('Zu GitHub übertragen', h('div', {},
-    feld(`GitHub-Repo (Konto ${zugang.konto})`, h('div', {}, suche, h('div', { style: 'margin-top:6px' }, auswahl)), 'Alle Repos, an die dein Token herankommt. Grau = schon mit diesem Projekt verbunden oder ohne Schreibrecht.'),
+    feld(`GitHub-Repo (Konto ${zugang.konto})`, h('div', {}, suche, h('div', { style: 'margin-top:6px' }, auswahl), hinweis), 'Alle Repos, an die dein Token herankommt. Grau = schon mit diesem Projekt verbunden oder ohne Schreibrecht.'),
     neuFeld, ww.el,
     h('label', { class: 'haken' }, jetzt, h('span', {}, 'Nach dem Einrichten gleich einmal übertragen'))),
   [{ text: 'Abbrechen' }, { text: 'Verbinden', art: 'haupt', aktion: () => {
