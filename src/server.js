@@ -263,6 +263,7 @@ export function erstelleServer({ daten, oeffentlicheAdresse = '', github: github
     const lauf = ich.admin ? releaseLaeufe.get(meta.__pfad) : null;
     return { ablage: await ablage.da(), dateien, oeffentlich: ich.admin ? r.oeffentlich || null : !!r.oeffentlich, verboten: ich.admin ? r.verboten || [] : [],
       auto: r.auto === true, auto_fehler: ich.admin && r.autoFehler ? r.autoFehler : null,
+      auto_wartet: ich.admin && r.autoWartet ? r.autoWartet : null,
       lauf: lauf && auftraege.has(lauf.id) ? lauf : null };
   }
 
@@ -364,6 +365,17 @@ export function erstelleServer({ daten, oeffentlicheAdresse = '', github: github
    */
   const AUTOMATIK = { name: 'fah-git', anzeige: 'FAH-Git (automatisch)', admin: true };
   let automatikLaeuft = false;
+  /** Grund, warum eine neue Fassung wartet, am Projekt vermerken (nur bei Änderung schreiben); null = nichts wartet. */
+  async function wartetSetzen(pfad, r, w) {
+    const alt = r.autoWartet || null;
+    if (!w && !alt) return;
+    if (w && alt && alt.grund === w.grund && alt.version === w.version) return;
+    await baum.projektAendern(pfad, (x) => {
+      if (!x.releases) return;
+      if (w) x.releases.autoWartet = { ...w, datei: r.oeffentlich, seit: new Date().toISOString() };
+      else delete x.releases.autoWartet;
+    });
+  }
   async function releasesAutomatisch() {
     if (automatikLaeuft || ersatz) return [];
     automatikLaeuft = true;
@@ -374,16 +386,29 @@ export function erstelleServer({ daten, oeffentlicheAdresse = '', github: github
       for (const [pfad, p] of Object.entries(meta.projekte)) {
         const r = p.releases || {};
         if (r.auto !== true || !r.oeffentlich) continue;
-        const s = (p.spiegel || []).find((x) => x.art === 'github' && x.modus === 'oeffentlich' && x.aktiv !== false && x.zuletzt && x.zuletzt.ergebnis === 'ok');
+        const s = (p.spiegel || []).find((x) => x.art === 'github' && x.modus === 'oeffentlich' && x.aktiv !== false);
         if (!s) continue;
-        const lauf = releaseLaeufe.get(pfad);
-        if (lauf && lauf.status === 'laeuft') continue;
+        // 1.17.4 (Betreiber 28.11.2026, Friday hing vom 27.11. 18:23 bis 28.11. 14:03 ohne jede Meldung): Wartet eine
+        // neue Fassung, steht der Grund am Projekt (Reiter Releases) – nie mehr still überspringen.
         const info = await ablage.info(r.oeffentlich).catch(() => null);
-        if (!info || info.fehlt || info.gesperrt || Date.now() - new Date(info.zeit).getTime() < 120_000) continue;
-        const version = versionAusZeit(info.zeit);
+        const version = info && info.zeit ? versionAusZeit(info.zeit) : null;
         const letztes = (s.releases || [])[0];
-        if (letztes && letztes.quelle === r.oeffentlich && letztes.tag === version) continue;
-        if (r.autoFehler && r.autoFehler.datei === r.oeffentlich && r.autoFehler.version === version) continue;
+        if (version && letztes && letztes.quelle === r.oeffentlich && letztes.tag === version) { await wartetSetzen(pfad, r, null); continue; }
+        let grund = null;
+        if (!info || info.fehlt) grund = 'Die öffentliche Datei fehlt in der Ablage';
+        else if (info.gesperrt) grund = `Die öffentliche Datei ist gesperrt (${info.gesperrt})`;
+        else if (Date.now() - new Date(info.zeit).getTime() < 120_000) continue;      // wird evtl. noch kopiert – gleich wieder
+        else if (!(s.zuletzt && s.zuletzt.ergebnis === 'ok')) {
+          grund = `Der Code-Spiegel ${s.repo} ist nicht in Ordnung (${s.zuletzt ? (s.zuletzt.text || s.zuletzt.ergebnis) : 'noch nie übertragen'}) – das Release wartet, bis er wieder klappt`;
+        }
+        const lauf = releaseLaeufe.get(pfad);
+        if (!grund && lauf && lauf.status === 'laeuft') {
+          if (auftraege.has(lauf.id)) continue;                                        // läuft wirklich gerade
+          releaseLaeufe.delete(pfad);                                                  // verwaist: blockiert nie wieder still
+        }
+        if (grund) { await wartetSetzen(pfad, r, { version, grund: String(grund).slice(0, 600) }); continue; }
+        if (r.autoFehler && r.autoFehler.datei === r.oeffentlich && r.autoFehler.version === version) continue;   // steht schon da
+        await wartetSetzen(pfad, r, null);
         const a = releaseAusAblageStarten(pfad, s, r, { version, ich: AUTOMATIK });
         await a.fertig;
         await baum.projektAendern(pfad, (x) => {

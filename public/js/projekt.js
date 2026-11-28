@@ -601,7 +601,8 @@ function releasesAnsicht(p, admin) {
     }),
     h('label', { class: 'haken', style: 'margin-top:6px' }, h('input', { type: 'checkbox', checked: !!r.auto, onchange: (e) => autoSetzen(e.target.checked) }),
       h('span', {}, 'Neue Fassungen automatisch veröffentlichen'), h('span', { class: 'schwach klein' }, ' – liegt eine neue Fassung der öffentlichen Datei in der Ablage, geht sie mit denselben Prüfungen von selbst zu GitHub')),
-    r.auto_fehler ? h('div', { class: 'hinweisbox rot', style: 'margin-top:8px' }, sym('warnung'), h('div', {}, `Automatik gestoppt bei ${r.auto_fehler.version}: ${r.auto_fehler.fehler} – die nächste Fassung wird wieder versucht.`)) : null) : null;
+    r.auto_fehler ? h('div', { class: 'hinweisbox rot', style: 'margin-top:8px' }, sym('warnung'), h('div', {}, `Automatik gestoppt bei ${r.auto_fehler.version}: ${r.auto_fehler.fehler} – die nächste Fassung wird wieder versucht.`)) : null,
+    r.auto_wartet ? h('div', { class: 'hinweisbox warn', style: 'margin-top:8px' }, sym('warnung'), h('div', {}, `Neue Fassung ${r.auto_wartet.version || ''} wartet seit ${new Date(r.auto_wartet.seit).toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'short' })}: ${r.auto_wartet.grund}`)) : null) : null;
   return h('div', {},
     h('div', { class: 'karte abschnitt' },
       h('div', { class: 'karten-kopf' }, h('h2', {}, 'Releases'),

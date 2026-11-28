@@ -61,7 +61,9 @@ Textdateien direkt im Browser bearbeiten – „Bearbeiten“, tippen, speichern
   und Tags werden danach entfernt). Seit 1.16.0 geht das auf Wunsch von selbst („Neue Fassungen automatisch veröffentlichen“
   im Reiter Releases): Liegt eine neue Fassung der öffentlichen Datei in der Ablage (älter als 2 Minuten), prüft und
   veröffentlicht FAH-Git sie innerhalb von 5 Minuten; scheitert eine Fassung, steht der Grund am Projekt und in der Aktivität.
-  Ist der Stand schon das Release auf GitHub, meldet der Knopf „schon aktuell“.
+  Ist der Stand schon das Release auf GitHub, meldet der Knopf „schon aktuell“. Seit 1.17.4 überspringt die Automatik nie
+  mehr still: Wartet eine neue Fassung (Code-Spiegel nicht in Ordnung, Datei fehlt/gesperrt), steht der Grund gelb im
+  Reiter Releases; ein verwaister Lauf blockiert nicht mehr.
 - Art je Projekt (1.17.0, Projekt → Einstellungen → Art): „App“ oder „Docker“ bestimmt die GitHub-Vorlage beim Verbinden.
   App: wie FAH-Friday nur das öffentliche README (`.github/README.md`) und die Bilder, die App kommt als Release; ohne
   `.github/README.md` überträgt FAH-Git nichts. Docker: öffentlicher Stand mit Quellcode. Beide: automatisch übertragen,
